@@ -37,6 +37,10 @@ func runDoctor(ctx context.Context, deps *Deps) error {
 	fmt.Fprintln(deps.Stdout, "=== Providers ===")
 	for _, p := range reg.List() {
 		pc, _ := cfg.Provider(p.ID())
+		if err := validateAPIKey(pc, baseEnv); err != nil {
+			fmt.Fprintf(deps.Stdout, "- %s: WARNING: %v\n", p.ID(), err)
+			continue
+		}
 		binPath, lookErr := deps.LookPath(p.Binary())
 		if lookErr != nil {
 			fmt.Fprintf(deps.Stdout, "- %s (%s): not found (auth=%s)\n", p.ID(), p.Binary(), pc.Auth)

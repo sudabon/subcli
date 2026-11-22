@@ -62,8 +62,7 @@ func TestCodex_HeadlessArgv(t *testing.T) {
 			"--json",
 			"--sandbox", "workspace-write",
 			"-m", "o3",
-			"-C", "/path/to/repo",
-			"fix tests",
+			"--", "fix tests",
 		}
 		if !reflect.DeepEqual(argv, want) {
 			t.Errorf("argv = %v, want %v", argv, want)
@@ -85,7 +84,7 @@ func TestCodex_HeadlessArgv(t *testing.T) {
 			"exec",
 			"--json",
 			"--sandbox", "read-only",
-			"review code",
+			"--", "review code",
 		}
 		if !reflect.DeepEqual(argv, want) {
 			t.Errorf("argv = %v, want %v", argv, want)
@@ -108,7 +107,7 @@ func TestCodex_HeadlessArgv(t *testing.T) {
 			"--json",
 			"-c", `sandbox_mode="read-only"`,
 			"-m", "gpt-5-codex",
-			"01a20085-2878-74a3-896c-b98dc5f74bbf",
+			"--", "01a20085-2878-74a3-896c-b98dc5f74bbf",
 			"continue please",
 		}
 		if !reflect.DeepEqual(argv, want) {
@@ -218,11 +217,10 @@ func TestCodex_ParseFixtures(t *testing.T) {
 		}
 	})
 
-	t.Run("unknown and malformed lines never fail Parse", func(t *testing.T) {
+	t.Run("unknown event types are preserved", func(t *testing.T) {
 		cases := []string{
 			`{"type":"future.event","data":42}`,
 			`{"type":"item.completed","item":{"id":"x","type":"future_item"}}`,
-			`non-json output`,
 		}
 		for _, rawLine := range cases {
 			evs, err := a.Parse([]byte(rawLine))
@@ -234,4 +232,27 @@ func TestCodex_ParseFixtures(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestCodex_OnlyCompletedAgentMessageProducesText(t *testing.T) {
+	a := codex.New("")
+	var text string
+	for _, line := range []string{
+		`{"type":"item.started","item":{"type":"agent_message","text":"a"}}`,
+		`{"type":"item.updated","item":{"type":"agent_message","text":"ab"}}`,
+		`{"type":"item.completed","item":{"type":"agent_message","text":"abc"}}`,
+	} {
+		events, err := a.Parse([]byte(line))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, ev := range events {
+			if ev.Kind == event.Text {
+				text += ev.Text
+			}
+		}
+	}
+	if text != "abc" {
+		t.Errorf("combined text = %q, want abc", text)
+	}
 }

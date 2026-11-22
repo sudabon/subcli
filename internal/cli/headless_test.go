@@ -11,10 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sudabon/subcli/internal/config"
 	"github.com/sudabon/subcli/internal/event"
-	"github.com/sudabon/subcli/internal/logging"
-	"github.com/sudabon/subcli/internal/policy"
 	"github.com/sudabon/subcli/internal/provider"
 	"github.com/sudabon/subcli/internal/render"
 	"github.com/sudabon/subcli/internal/session"
@@ -78,12 +75,10 @@ func TestSessionsCmd_ListShowRmAndMissingID(t *testing.T) {
 
 	execCmd := func(args ...string) (string, string, error) {
 		var stdout, stderr bytes.Buffer
-		deps := Deps{
-			OpenStore: openStore,
-			Logger:    logging.NewWriter(&bytes.Buffer{}),
-			Stdout:    &stdout,
-			Stderr:    &stderr,
-		}
+		deps := testDeps(t)
+		deps.OpenStore = openStore
+		deps.Stdout = &stdout
+		deps.Stderr = &stderr
 		cmd := NewRootCmd(deps)
 		cmd.SetArgs(args)
 		err := cmd.Execute()
@@ -142,16 +137,13 @@ func TestSessionsCmd_ListShowRmAndMissingID(t *testing.T) {
 func TestRunCmd_InvalidPermAndPolicyCheck(t *testing.T) {
 	t.Run("rejects invalid --perm before launching child", func(t *testing.T) {
 		lookedUp := false
-		deps := Deps{
-			LoadConfig: func() (config.Config, error) { return config.Default(), nil },
-			LookPath: func(file string) (string, error) {
-				lookedUp = true
-				return "/usr/bin/" + file, nil
-			},
-			Logger: logging.NewWriter(&bytes.Buffer{}),
-			Stdout: &bytes.Buffer{},
-			Stderr: &bytes.Buffer{},
+		deps := testDeps(t)
+		deps.LookPath = func(file string) (string, error) {
+			lookedUp = true
+			return "/usr/bin/" + file, nil
 		}
+		deps.Stdout = &bytes.Buffer{}
+		deps.Stderr = &bytes.Buffer{}
 		for _, badPerm := range []string{"full", "bypass", "bypassPermissions", "danger-full-access"} {
 			cmd := NewRootCmd(deps)
 			cmd.SetArgs([]string{"run", "claude", "--perm", badPerm, "hello"})
@@ -167,17 +159,13 @@ func TestRunCmd_InvalidPermAndPolicyCheck(t *testing.T) {
 	t.Run("policy denies agy subscription run before launching child", func(t *testing.T) {
 		lookedUp := false
 		var stderr bytes.Buffer
-		deps := Deps{
-			LoadConfig:    func() (config.Config, error) { return config.Default(), nil },
-			DetectContext: func() policy.CallContext { return policy.CallContext{StdinIsTTY: true, UnderAgent: false} },
-			LookPath: func(file string) (string, error) {
-				lookedUp = true
-				return "/usr/bin/" + file, nil
-			},
-			Logger: logging.NewWriter(&bytes.Buffer{}),
-			Stdout: &bytes.Buffer{},
-			Stderr: &stderr,
+		deps := testDeps(t)
+		deps.LookPath = func(file string) (string, error) {
+			lookedUp = true
+			return "/usr/bin/" + file, nil
 		}
+		deps.Stdout = &bytes.Buffer{}
+		deps.Stderr = &stderr
 		cmd := NewRootCmd(deps)
 		cmd.SetArgs([]string{"run", "agy", "hello"})
 		err := cmd.Execute()
@@ -206,24 +194,19 @@ func TestRunSessionsResume_RoundTrip_ClaudeAndCodex(t *testing.T) {
 		envFile := filepath.Join(t.TempDir(), "claude-env.txt")
 		now := time.Date(2026, 11, 22, 10, 0, 0, 0, time.UTC)
 
-		baseEnv := append([]string{}, os.Environ()...)
+		baseEnv := fakeCLIEnv()
 		baseEnv = provider.SetEnv(baseEnv, "ANTHROPIC_API_KEY", "sk-ant-should-not-leak")
 		baseEnv = provider.SetEnv(baseEnv, "FAKE_CLI_RECORD_ARGS", argsFile)
 		baseEnv = provider.SetEnv(baseEnv, "FAKE_CLI_RECORD_ENV", envFile)
 
 		var stdout, stderr bytes.Buffer
-		deps := Deps{
-			LoadConfig:    func() (config.Config, error) { return config.Default(), nil },
-			DetectContext: func() policy.CallContext { return policy.CallContext{StdinIsTTY: true} },
-			LookPath:      fakeBinLookPath(t),
-			Environ:       func() []string { return baseEnv },
-			Getwd:         func() (string, error) { return workDir, nil },
-			OpenStore:     openStore,
-			Now:           func() time.Time { return now },
-			Logger:        logging.NewWriter(&bytes.Buffer{}),
-			Stdout:        &stdout,
-			Stderr:        &stderr,
-		}
+		deps := testDeps(t)
+		deps.Environ = func() []string { return baseEnv }
+		deps.Getwd = func() (string, error) { return workDir, nil }
+		deps.OpenStore = openStore
+		deps.Now = func() time.Time { return now }
+		deps.Stdout = &stdout
+		deps.Stderr = &stderr
 
 		// 1. run claude
 		cmd := NewRootCmd(deps)
@@ -296,26 +279,25 @@ func TestRunSessionsResume_RoundTrip_ClaudeAndCodex(t *testing.T) {
 	t.Run("codex run --json -> resume round-trip and --no-store", func(t *testing.T) {
 		argsFile := filepath.Join(t.TempDir(), "codex-args.txt")
 		cwdFile := filepath.Join(t.TempDir(), "codex-cwd.txt")
-		baseEnv := append([]string{}, os.Environ()...)
+		baseEnv := fakeCLIEnv()
 		baseEnv = provider.SetEnv(baseEnv, "FAKE_CLI_RECORD_ARGS", argsFile)
 		baseEnv = provider.SetEnv(baseEnv, "FAKE_CLI_RECORD_CWD", cwdFile)
 
 		var stdout, stderr bytes.Buffer
-		deps := Deps{
-			LoadConfig:    func() (config.Config, error) { return config.Default(), nil },
-			DetectContext: func() policy.CallContext { return policy.CallContext{StdinIsTTY: true} },
-			LookPath:      fakeBinLookPath(t),
-			Environ:       func() []string { return baseEnv },
-			Getwd:         func() (string, error) { return workDir, nil },
-			OpenStore:     openStore,
-			Logger:        logging.NewWriter(&bytes.Buffer{}),
-			Stdout:        &stdout,
-			Stderr:        &stderr,
-		}
+		deps := testDeps(t)
+		deps.Environ = func() []string { return baseEnv }
+		deps.Getwd = func() (string, error) { return workDir, nil }
+		deps.OpenStore = openStore
+		deps.Stdout = &stdout
+		deps.Stderr = &stderr
 
 		// 1. run codex with --json
 		cmd := NewRootCmd(deps)
-		cmd.SetArgs([]string{"run", "codex", "--json", "--perm", "edit", "--cwd", workDir, "テスト"})
+		subdir := filepath.Join(workDir, "project")
+		if err := os.Mkdir(subdir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		cmd.SetArgs([]string{"run", "codex", "--json", "--perm", "edit", "--cwd", "project", "テスト"})
 		if err := cmd.Execute(); err != nil {
 			t.Fatalf("run codex error: %v (stderr=%s)", err, stderr.String())
 		}
@@ -341,6 +323,9 @@ func TestRunSessionsResume_RoundTrip_ClaudeAndCodex(t *testing.T) {
 		for _, r := range list {
 			if r.Provider == "codex" {
 				codexID = r.ID
+				if r.Cwd != subdir {
+					t.Fatalf("stored cwd = %q, want %q", r.Cwd, subdir)
+				}
 			}
 		}
 		if codexID == "" {
@@ -363,7 +348,7 @@ func TestRunSessionsResume_RoundTrip_ClaudeAndCodex(t *testing.T) {
 			t.Errorf("unexpected codex resume args:\n%s", string(recordedArgs))
 		}
 		recordedCwd, _ := os.ReadFile(cwdFile)
-		resolvedWorkDir, _ := filepath.EvalSymlinks(workDir)
+		resolvedWorkDir, _ := filepath.EvalSymlinks(subdir)
 		resolvedRecorded, _ := filepath.EvalSymlinks(strings.TrimSpace(string(recordedCwd)))
 		if resolvedRecorded != resolvedWorkDir {
 			t.Errorf("codex resume cwd = %q, want %q", resolvedRecorded, resolvedWorkDir)
@@ -388,16 +373,14 @@ func TestRunSessionsResume_RoundTrip_ClaudeAndCodex(t *testing.T) {
 
 	t.Run("resume nonexistent local session ID fails without launching CLI", func(t *testing.T) {
 		lookedUp := false
-		deps := Deps{
-			OpenStore: openStore,
-			LookPath: func(file string) (string, error) {
-				lookedUp = true
-				return "", errors.New("should not be called")
-			},
-			Logger: logging.NewWriter(&bytes.Buffer{}),
-			Stdout: &bytes.Buffer{},
-			Stderr: &bytes.Buffer{},
+		deps := testDeps(t)
+		deps.OpenStore = openStore
+		deps.LookPath = func(file string) (string, error) {
+			lookedUp = true
+			return "", errors.New("should not be called")
 		}
+		deps.Stdout = &bytes.Buffer{}
+		deps.Stderr = &bytes.Buffer{}
 		cmd := NewRootCmd(deps)
 		cmd.SetArgs([]string{"resume", "does-not-exist", "hello"})
 		if err := cmd.Execute(); err == nil {
@@ -407,4 +390,95 @@ func TestRunSessionsResume_RoundTrip_ClaudeAndCodex(t *testing.T) {
 			t.Fatalf("LookPath must not be called when session ID does not exist")
 		}
 	})
+}
+
+func TestTerminalProviderErrorWithSuccessfulChild(t *testing.T) {
+	for _, provID := range []string{"claude", "codex"} {
+		for _, op := range []string{"run", "compare", "chain"} {
+			t.Run(provID+"/"+op, func(t *testing.T) {
+				deps := testDeps(t)
+				invocations := filepath.Join(t.TempDir(), "calls")
+				fixture := filepath.Join(testRepoRoot(t), "testdata", provID, "error.ndjson")
+				deps.Environ = func() []string {
+					return append(fakeCLIEnv(), "FAKE_CLI_FIXTURE="+fixture, "FAKE_CLI_INVOCATION_LOG="+invocations)
+				}
+				args := []string{"run", provID, "hello"}
+				switch op {
+				case "compare":
+					args = []string{"compare", "--providers", provID, "hello"}
+				case "chain":
+					args = []string{"chain", "--steps", provID + "," + provID, "--prompt", "hello", "--then", "{{.Prev}}"}
+				}
+				cmd := NewRootCmd(deps)
+				cmd.SetArgs(args)
+				var exit *ExitError
+				if err := cmd.Execute(); !errors.As(err, &exit) || exit.Code != 1 {
+					t.Fatalf("exit = %v, want 1", err)
+				}
+				calls, err := os.ReadFile(invocations)
+				if err != nil || len(strings.Fields(string(calls))) != 1 {
+					t.Fatalf("child invocations = %q, err = %v", calls, err)
+				}
+				if op == "run" {
+					store, err := deps.OpenStore()
+					if err != nil {
+						t.Fatal(err)
+					}
+					defer store.Close()
+					records, err := store.List(context.Background())
+					if err != nil || len(records) != 0 {
+						t.Fatalf("failed run saved %d records, err = %v", len(records), err)
+					}
+				}
+			})
+		}
+	}
+}
+
+type failingOutput struct{ err error }
+
+func (w failingOutput) Write([]byte) (int, error) { return 0, w.err }
+
+func TestOutputFailurePropagated(t *testing.T) {
+	for _, args := range [][]string{
+		{"run", "claude", "--json", "hello"},
+		{"compare", "--providers", "claude,codex", "--json", "hello"},
+		{"chain", "--steps", "claude,codex", "--prompt", "hello", "--then", "{{.Prev}}"},
+		{"chain", "--steps", "claude,codex", "--json", "--prompt", "hello", "--then", "{{.Prev}}"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			deps := testDeps(t)
+			want := errors.New("output full")
+			deps.Stdout = failingOutput{want}
+			cmd := NewRootCmd(deps)
+			cmd.SetArgs(args)
+			if err := cmd.Execute(); !errors.Is(err, want) {
+				t.Fatalf("got %v, want output error", err)
+			}
+		})
+	}
+}
+
+func TestResumePrelaunchFailurePreservesLastRun(t *testing.T) {
+	deps := testDeps(t)
+	store, err := deps.OpenStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	last := deps.Now().Add(-time.Hour)
+	record, err := store.Create(context.Background(), session.Record{Provider: "codex", ProviderSessionID: "thread", Cwd: t.TempDir(), CreatedAt: last, LastRunAt: last})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deps.LookPath = func(string) (string, error) { return "", errors.New("missing executable") }
+	cmd := NewRootCmd(deps)
+	cmd.SetArgs([]string{"resume", record.ID, "hello"})
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("expected a launch error")
+	}
+	got, err := store.Get(context.Background(), record.ID)
+	if err != nil || !got.LastRunAt.Equal(last) {
+		t.Fatalf("last_run_at = %v, err = %v", got.LastRunAt, err)
+	}
 }

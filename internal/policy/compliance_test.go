@@ -34,7 +34,7 @@ func repoRoot(t *testing.T) string {
 
 // TestNoCredentialAccess verifies that implementation files under cmd/ and internal/
 // never reference official CLI credential files, OAuth token helpers, or OS keychain APIs.
-// The banned list lives strictly inside this test file per spce.md §7.4.
+// The banned list lives strictly inside this test file.
 func TestNoCredentialAccess(t *testing.T) {
 	banned := []string{
 		".credentials.json",

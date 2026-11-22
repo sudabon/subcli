@@ -3,6 +3,7 @@ package render_test
 import (
 	"bytes"
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -104,5 +105,16 @@ func TestJSONLRenderer(t *testing.T) {
 		if got.Kind != input[i].Kind || got.Provider != input[i].Provider {
 			t.Errorf("line %d = (%q,%q), want (%q,%q)", i, got.Provider, got.Kind, input[i].Provider, input[i].Kind)
 		}
+	}
+}
+
+func TestNullOutputIsNotTerminal(t *testing.T) {
+	out, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer out.Close()
+	if render.IsTerminal(out) {
+		t.Fatalf("%s output detected as a terminal", os.DevNull)
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -42,7 +43,8 @@ var (
 	// ErrTopicNotFound is returned when a requested topic file does not exist.
 	ErrTopicNotFound = errors.New("指定されたトピックが見つかりません")
 
-	topicPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+	claudeProjectSeparator = regexp.MustCompile(`[^a-zA-Z0-9]`)
+	topicPattern           = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 )
 
 // Store manages repository-local shared memory under <repo-root>/.subcli/.
@@ -124,8 +126,10 @@ func FindRepoRoot(startDir string) (root string, isGit bool, err error) {
 	cur := filepath.Clean(abs)
 	for {
 		gitMarker := filepath.Join(cur, ".git")
-		if _, statErr := os.Stat(gitMarker); statErr == nil {
+		if _, statErr := os.Lstat(gitMarker); statErr == nil {
 			return cur, true, nil
+		} else if !errors.Is(statErr, fs.ErrNotExist) {
+			return "", false, fmt.Errorf("Git ディレクトリを確認できません: %w", statErr)
 		}
 		parent := filepath.Dir(cur)
 		if parent == cur {
@@ -160,13 +164,34 @@ func ForRoot(repoRoot string, isGit bool) *Store {
 	}
 }
 
-// Exists reports whether <repo-root>/.subcli/memory/MEMORY.md exists.
-func (s *Store) Exists() bool {
-	if s == nil {
-		return false
+// Initialized distinguishes absent memory from an unsafe or unreadable path.
+func (s *Store) Initialized() (bool, error) {
+	_, err := s.statFile(s.MemoryFile)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
 	}
-	info, err := os.Stat(s.MemoryFile)
-	return err == nil && !info.IsDir()
+	return err == nil, err
+}
+
+// HasTrackedMemory reports whether Git tracks any entry under .subcli.
+// An ignored directory can still contain files tracked in an existing checkout.
+func (s *Store) HasTrackedMemory() (bool, error) {
+	if !s.IsGitRepo {
+		return false, nil
+	}
+	cmd := exec.Command("git", "-C", s.RepoRoot, "-c", "core.fsmonitor=false", "ls-files", "--cached", "-z", "--", ":(icase,literal).subcli")
+	// A caller's alternate index or repository must not mask the checkout's files.
+	cmd.Env = []string{}
+	for _, entry := range os.Environ() {
+		if !strings.HasPrefix(strings.ToUpper(entry), "GIT_") {
+			cmd.Env = append(cmd.Env, entry)
+		}
+	}
+	out, err := cmd.Output()
+	if err != nil {
+		return false, fmt.Errorf(".subcli の Git 管理状態を確認できません: %w", err)
+	}
+	return len(out) > 0, nil
 }
 
 // ProjectionDir returns the generated projection directory for a provider ID.
@@ -178,26 +203,27 @@ func (s *Store) ProjectionDir(providerID string) string {
 // .subcli/ is recorded in <repo-root>/.gitignore (unless SkipGitignore is set),
 // and generates provider projections.
 func (s *Store) Init(opts InitOptions) (InitResult, error) {
-	if err := ensurePrivateDir(s.BaseDir); err != nil {
+	dir, err := openDirBelow(s.RepoRoot, s.MemoryDir, true)
+	if err != nil {
 		return InitResult{}, err
 	}
-	if err := ensurePrivateDir(s.MemoryDir); err != nil {
-		return InitResult{}, err
-	}
+	dir.Close()
 
 	res := InitResult{
 		RepoRoot:   s.RepoRoot,
 		MemoryFile: s.MemoryFile,
 	}
 
-	if !s.Exists() {
-		if err := writePrivateFile(s.MemoryFile, []byte(initialMainTemplate())); err != nil {
+	if _, err := s.statFile(s.MemoryFile); errors.Is(err, fs.ErrNotExist) {
+		if err := s.writePrivateFile(s.MemoryFile, []byte(initialMainTemplate())); err != nil {
 			return InitResult{}, fmt.Errorf("%s の作成に失敗しました: %w", s.MemoryFile, err)
 		}
 		res.CreatedMemory = true
+	} else if err != nil {
+		return InitResult{}, err
 	}
 
-	if !opts.SkipGitignore {
+	if s.IsGitRepo && !opts.SkipGitignore {
 		updated, err := s.EnsureGitignore()
 		if err != nil {
 			return InitResult{}, err
@@ -213,8 +239,11 @@ func (s *Store) Init(opts InitOptions) (InitResult, error) {
 
 // IsGitignored reports whether <repo-root>/.gitignore contains an entry covering .subcli.
 func (s *Store) IsGitignored() (bool, error) {
+	if !s.IsGitRepo {
+		return false, nil
+	}
 	gitignorePath := filepath.Join(s.RepoRoot, ".gitignore")
-	data, err := os.ReadFile(gitignorePath)
+	data, err := readFileBelow(s.RepoRoot, gitignorePath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return false, nil
@@ -226,9 +255,12 @@ func (s *Store) IsGitignored() (bool, error) {
 
 // EnsureGitignore appends .subcli/ to <repo-root>/.gitignore if not already ignored.
 func (s *Store) EnsureGitignore() (bool, error) {
+	if !s.IsGitRepo {
+		return false, nil
+	}
 	gitignorePath := filepath.Join(s.RepoRoot, ".gitignore")
 	var existing []byte
-	data, err := os.ReadFile(gitignorePath)
+	data, err := readFileBelow(s.RepoRoot, gitignorePath)
 	if err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
 			return false, fmt.Errorf(".gitignore の読み込みに失敗しました: %w", err)
@@ -252,10 +284,10 @@ func (s *Store) EnsureGitignore() (bool, error) {
 	buf.WriteString(".subcli/\n")
 
 	mode := os.FileMode(0o644)
-	if info, statErr := os.Stat(gitignorePath); statErr == nil {
+	if info, statErr := s.statFile(gitignorePath); statErr == nil {
 		mode = info.Mode().Perm()
 	}
-	if err := os.WriteFile(gitignorePath, buf.Bytes(), mode); err != nil {
+	if err := s.replaceFile(gitignorePath, buf.Bytes(), mode); err != nil {
 		return false, fmt.Errorf(".gitignore の更新に失敗しました: %w", err)
 	}
 	return true, nil
@@ -330,20 +362,20 @@ func (s *Store) AddEntry(text string, topic string, now time.Time, opts InitOpti
 	var targetFile string
 	if topic == "" {
 		targetFile = s.MemoryFile
-		if err := appendMarkdownLine(targetFile, entry); err != nil {
+		if err := s.appendMarkdownLine(targetFile, entry); err != nil {
 			return AddResult{}, err
 		}
 	} else {
 		targetFile = filepath.Join(s.MemoryDir, topic+".md")
-		if _, statErr := os.Stat(targetFile); errors.Is(statErr, os.ErrNotExist) {
+		if _, statErr := s.statFile(targetFile); errors.Is(statErr, os.ErrNotExist) {
 			header := fmt.Sprintf("# Topic: %s\n\n%s\n", topic, entry)
-			if err := writePrivateFile(targetFile, []byte(header)); err != nil {
+			if err := s.writePrivateFile(targetFile, []byte(header)); err != nil {
 				return AddResult{}, fmt.Errorf("トピックファイルの作成に失敗しました: %w", err)
 			}
 		} else if statErr != nil {
 			return AddResult{}, statErr
 		} else {
-			if err := appendMarkdownLine(targetFile, entry); err != nil {
+			if err := s.appendMarkdownLine(targetFile, entry); err != nil {
 				return AddResult{}, err
 			}
 		}
@@ -367,27 +399,35 @@ func (s *Store) AddEntry(text string, topic string, now time.Time, opts InitOpti
 
 // ReadMain returns the contents of MEMORY.md.
 func (s *Store) ReadMain() (string, error) {
-	if !s.Exists() {
+	data, err := readFileBelow(s.RepoRoot, s.MemoryFile)
+	if errors.Is(err, fs.ErrNotExist) {
 		return "", ErrNotInitialized
 	}
-	data, err := os.ReadFile(s.MemoryFile)
 	if err != nil {
 		return "", fmt.Errorf("%s の読み込みに失敗しました: %w", s.MemoryFile, err)
 	}
 	return string(data), nil
 }
 
+func (s *Store) checkInitialized() error {
+	_, err := s.statFile(s.MemoryFile)
+	if errors.Is(err, fs.ErrNotExist) {
+		return ErrNotInitialized
+	}
+	return err
+}
+
 // ReadTopic returns the contents of <topic>.md.
 func (s *Store) ReadTopic(topic string) (string, error) {
-	if !s.Exists() {
-		return "", ErrNotInitialized
+	if err := s.checkInitialized(); err != nil {
+		return "", err
 	}
 	topic = strings.TrimSuffix(strings.TrimSpace(topic), ".md")
 	if err := ValidateTopic(topic); err != nil {
 		return "", err
 	}
 	p := filepath.Join(s.MemoryDir, topic+".md")
-	data, err := os.ReadFile(p)
+	data, err := readFileBelow(s.RepoRoot, p)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return "", fmt.Errorf("%w: %s", ErrTopicNotFound, topic)
@@ -399,10 +439,15 @@ func (s *Store) ReadTopic(topic string) (string, error) {
 
 // List returns MEMORY.md (first) followed by sorted topic Markdown files.
 func (s *Store) List() ([]FileInfo, error) {
-	if !s.Exists() {
-		return nil, ErrNotInitialized
+	if err := s.checkInitialized(); err != nil {
+		return nil, err
 	}
-	entries, err := os.ReadDir(s.MemoryDir)
+	dir, err := openDirBelow(s.RepoRoot, s.MemoryDir, false)
+	if err != nil {
+		return nil, err
+	}
+	defer dir.Close()
+	entries, err := fs.ReadDir(dir.FS(), ".")
 	if err != nil {
 		return nil, fmt.Errorf("メモリディレクトリの読み取りに失敗しました: %w", err)
 	}
@@ -413,9 +458,9 @@ func (s *Store) List() ([]FileInfo, error) {
 		if entry.IsDir() || !strings.HasSuffix(strings.ToLower(entry.Name()), ".md") {
 			continue
 		}
-		info, statErr := entry.Info()
+		info, statErr := regularFile(dir, entry.Name())
 		if statErr != nil {
-			continue
+			return nil, statErr
 		}
 		fi := FileInfo{
 			Name:    entry.Name(),
@@ -448,31 +493,37 @@ func (s *Store) List() ([]FileInfo, error) {
 // RemoveTopic deletes <topic>.md, removes its index line from MEMORY.md, and
 // refreshes projections.
 func (s *Store) RemoveTopic(topic string) error {
-	if !s.Exists() {
-		return ErrNotInitialized
+	if err := s.checkInitialized(); err != nil {
+		return err
 	}
 	topic = strings.TrimSuffix(strings.TrimSpace(topic), ".md")
 	if err := ValidateTopic(topic); err != nil {
 		return err
 	}
-	target := filepath.Join(s.MemoryDir, topic+".md")
-	if err := os.Remove(target); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
+	dir, err := openDirBelow(s.RepoRoot, s.MemoryDir, false)
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	name := topic + ".md"
+	if _, err := regularFile(dir, name); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
 			return fmt.Errorf("%w: %s", ErrTopicNotFound, topic)
 		}
+		return err
+	}
+	if err := s.removeTopicIndexLink(topic); err != nil {
+		return fmt.Errorf("トピック %q の索引更新に失敗しました: %w", topic, err)
+	}
+	if err := dir.Remove(name); err != nil {
 		return fmt.Errorf("トピック %q の削除に失敗しました: %w", topic, err)
 	}
-	_ = s.removeTopicIndexLink(topic)
 	return s.Sync()
 }
 
 // Sync regenerates provider projection files under .subcli/projections/ from
 // the canonical .subcli/memory/ contents.
 func (s *Store) Sync() error {
-	if !s.Exists() {
-		return ErrNotInitialized
-	}
-
 	mainContent, err := s.ReadMain()
 	if err != nil {
 		return err
@@ -489,20 +540,14 @@ func (s *Store) Sync() error {
 	}
 
 	claudeDir := s.ProjectionDir("claude")
-	if err := ensurePrivateDir(claudeDir); err != nil {
-		return err
-	}
 	claudeDoc := s.renderProjection("claude", mainContent, topicPaths, MaxProjectionBytes)
-	if err := writePrivateFile(filepath.Join(claudeDir, "CLAUDE.md"), []byte(claudeDoc)); err != nil {
+	if err := s.writePrivateFile(filepath.Join(claudeDir, "CLAUDE.md"), []byte(claudeDoc)); err != nil {
 		return fmt.Errorf("claude 用メモリ投影の書き出しに失敗しました: %w", err)
 	}
 
 	agyDir := s.ProjectionDir("agy")
-	if err := ensurePrivateDir(agyDir); err != nil {
-		return err
-	}
 	agyDoc := s.renderProjection("agy", mainContent, topicPaths, MaxProjectionBytes)
-	if err := writePrivateFile(filepath.Join(agyDir, "AGENTS.md"), []byte(agyDoc)); err != nil {
+	if err := s.writePrivateFile(filepath.Join(agyDir, "AGENTS.md"), []byte(agyDoc)); err != nil {
 		return fmt.Errorf("agy 用メモリ投影の書き出しに失敗しました: %w", err)
 	}
 
@@ -542,11 +587,10 @@ func (s *Store) BuildProviderContext(providerID string) (provider.MemoryContext,
 // Status returns a snapshot of the shared memory state for the repository.
 func (s *Store) Status() (StatusInfo, error) {
 	st := StatusInfo{
-		RepoRoot:    s.RepoRoot,
-		IsGitRepo:   s.IsGitRepo,
-		MemoryDir:   s.MemoryDir,
-		MemoryFile:  s.MemoryFile,
-		Initialized: s.Exists(),
+		RepoRoot:   s.RepoRoot,
+		IsGitRepo:  s.IsGitRepo,
+		MemoryDir:  s.MemoryDir,
+		MemoryFile: s.MemoryFile,
 	}
 	ignored, err := s.IsGitignored()
 	if err != nil {
@@ -554,19 +598,27 @@ func (s *Store) Status() (StatusInfo, error) {
 	}
 	st.Gitignored = ignored
 
-	if st.Initialized {
-		if info, statErr := os.Stat(s.MemoryFile); statErr == nil {
-			st.MainSizeBytes = info.Size()
+	info, err := s.statFile(s.MemoryFile)
+	if err == nil {
+		st.Initialized = true
+		st.MainSizeBytes = info.Size()
+		files, err := s.List()
+		if err != nil {
+			return st, err
 		}
-		if files, listErr := s.List(); listErr == nil {
-			st.FileCount = len(files)
+		st.FileCount = len(files)
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return st, err
+	}
+	for path, set := range map[string]*bool{
+		filepath.Join(s.ProjectionDir("claude"), "CLAUDE.md"): &st.ClaudeProjectionSet,
+		filepath.Join(s.ProjectionDir("agy"), "AGENTS.md"):    &st.AgyProjectionSet,
+	} {
+		if _, err := s.statFile(path); err == nil {
+			*set = true
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			return st, err
 		}
-	}
-	if _, statErr := os.Stat(filepath.Join(s.ProjectionDir("claude"), "CLAUDE.md")); statErr == nil {
-		st.ClaudeProjectionSet = true
-	}
-	if _, statErr := os.Stat(filepath.Join(s.ProjectionDir("agy"), "AGENTS.md")); statErr == nil {
-		st.AgyProjectionSet = true
 	}
 	return st, nil
 }
@@ -600,8 +652,7 @@ func DefaultImportDir(providerName, repoRoot, homeDir string, lookupEnv func(str
 // key format used under ~/.claude/projects/<key>/memory/.
 func EncodeClaudeProjectKey(repoRoot string) string {
 	clean := filepath.ToSlash(filepath.Clean(repoRoot))
-	replacer := strings.NewReplacer("/", "-", ":", "-", " ", "-")
-	return replacer.Replace(clean)
+	return claudeProjectSeparator.ReplaceAllString(clean, "-")
 }
 
 // ImportMarkdownDir reads .md files from sourceDir (read-only), redacts secrets,
@@ -611,7 +662,7 @@ func (s *Store) ImportMarkdownDir(sourceDir string, providerName string, now tim
 	if prov != "claude" && prov != "codex" {
 		return ImportResult{}, fmt.Errorf("未対応のインポート元プロバイダです: %q（claude または codex を指定してください）", providerName)
 	}
-	info, err := os.Stat(sourceDir)
+	info, err := os.Lstat(sourceDir)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return ImportResult{}, fmt.Errorf("インポート元メモリディレクトリが見つかりません: %s", sourceDir)
@@ -627,7 +678,7 @@ func (s *Store) ImportMarkdownDir(sourceDir string, providerName string, now tim
 		if walkErr != nil {
 			return walkErr
 		}
-		if d.IsDir() {
+		if !d.Type().IsRegular() {
 			return nil
 		}
 		if strings.HasSuffix(strings.ToLower(d.Name()), ".md") {
@@ -662,7 +713,7 @@ func (s *Store) ImportMarkdownDir(sourceDir string, providerName string, now tim
 	var importedNames []string
 	anyRedacted := false
 	for _, p := range mdPaths {
-		raw, readErr := os.ReadFile(p)
+		raw, readErr := readFileBelow(sourceDir, p)
 		if readErr != nil {
 			return ImportResult{}, fmt.Errorf("%s の読み込みに失敗しました: %w", p, readErr)
 		}
@@ -681,7 +732,7 @@ func (s *Store) ImportMarkdownDir(sourceDir string, providerName string, now tim
 		buf.WriteString("\n\n")
 	}
 
-	if err := writePrivateFile(targetFile, []byte(buf.String())); err != nil {
+	if err := s.writePrivateFile(targetFile, []byte(buf.String())); err != nil {
 		return ImportResult{}, fmt.Errorf("インポート先ファイルの書き出しに失敗しました: %w", err)
 	}
 	if err := s.ensureTopicIndexLink(topic); err != nil {
@@ -723,7 +774,7 @@ func (s *Store) renderProjection(providerID, mainContent string, topicFiles []st
 	header.WriteString("\n## Current MEMORY.md\n\n")
 
 	headerStr := header.String()
-	body := strings.TrimSpace(mainContent)
+	body := strings.TrimSpace(logging.Redact(mainContent))
 	if body == "" {
 		return headerStr + "(empty)\n"
 	}
@@ -761,7 +812,7 @@ func truncateUTF8Line(s string, maxBytes int) string {
 }
 
 func (s *Store) ensureTopicIndexLink(topic string) error {
-	data, err := os.ReadFile(s.MemoryFile)
+	data, err := readFileBelow(s.RepoRoot, s.MemoryFile)
 	if err != nil {
 		return err
 	}
@@ -781,7 +832,7 @@ func (s *Store) ensureTopicIndexLink(topic string) error {
 			insertAt++
 		}
 		updated := content[:insertAt] + link + "\n" + content[insertAt:]
-		return writePrivateFile(s.MemoryFile, []byte(updated))
+		return s.writePrivateFile(s.MemoryFile, []byte(updated))
 	}
 
 	var buf strings.Builder
@@ -792,11 +843,11 @@ func (s *Store) ensureTopicIndexLink(topic string) error {
 	buf.WriteString("\n## Topics\n")
 	buf.WriteString(link)
 	buf.WriteByte('\n')
-	return writePrivateFile(s.MemoryFile, []byte(buf.String()))
+	return s.writePrivateFile(s.MemoryFile, []byte(buf.String()))
 }
 
 func (s *Store) removeTopicIndexLink(topic string) error {
-	data, err := os.ReadFile(s.MemoryFile)
+	data, err := readFileBelow(s.RepoRoot, s.MemoryFile)
 	if err != nil {
 		return err
 	}
@@ -814,11 +865,11 @@ func (s *Store) removeTopicIndexLink(topic string) error {
 	if !changed {
 		return nil
 	}
-	return writePrivateFile(s.MemoryFile, []byte(strings.Join(out, "\n")))
+	return s.writePrivateFile(s.MemoryFile, []byte(strings.Join(out, "\n")))
 }
 
-func appendMarkdownLine(path string, line string) error {
-	data, err := os.ReadFile(path)
+func (s *Store) appendMarkdownLine(path string, line string) error {
+	data, err := readFileBelow(s.RepoRoot, path)
 	if err != nil {
 		return fmt.Errorf("%s の読み込みに失敗しました: %w", path, err)
 	}
@@ -829,26 +880,7 @@ func appendMarkdownLine(path string, line string) error {
 	}
 	buf.WriteString(line)
 	buf.WriteByte('\n')
-	return writePrivateFile(path, buf.Bytes())
-}
-
-func ensurePrivateDir(dir string) error {
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("ディレクトリ %s の作成に失敗しました: %w", dir, err)
-	}
-	_ = os.Chmod(dir, 0o700)
-	return nil
-}
-
-func writePrivateFile(path string, data []byte) error {
-	if err := ensurePrivateDir(filepath.Dir(path)); err != nil {
-		return err
-	}
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		return err
-	}
-	_ = os.Chmod(path, 0o600)
-	return nil
+	return s.writePrivateFile(path, buf.Bytes())
 }
 
 func initialMainTemplate() string {

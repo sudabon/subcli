@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/mattn/go-isatty"
 	"github.com/sudabon/subcli/internal/provider"
 )
 
@@ -21,9 +22,11 @@ const (
 
 // CallContext captures runtime execution signals used for policy evaluation.
 type CallContext struct {
-	StdinIsTTY bool
-	UnderAgent bool
-	AgentHint  string
+	StdinIsTTY    bool
+	StdoutIsTTY   bool
+	AncestryError error
+	UnderAgent    bool
+	AgentHint     string
 }
 
 // Decision represents the outcome of a policy check.
@@ -69,10 +72,16 @@ func Check(prov string, auth provider.AuthMode, op Op, cc CallContext) Decision 
 				DocURL: docURL,
 			}
 		}
-		if !cc.StdinIsTTY {
+		if cc.AncestryError != nil {
+			return Decision{
+				Reason: fmt.Sprintf("祖先プロセスを確認できないため %s（subscription）の %s を実行できません: %v", prov, op, cc.AncestryError),
+				DocURL: docURL,
+			}
+		}
+		if !cc.StdinIsTTY || !cc.StdoutIsTTY {
 			return Decision{
 				Allow:  false,
-				Reason: fmt.Sprintf("標準入力が TTY ではない環境からは %s（subscription）の %s を実行できません。対話ターミナルから人間が直接起動してください。", prov, op),
+				Reason: fmt.Sprintf("標準入力と標準出力の両方が TTY の場合に限り %s（subscription）の %s を実行できます。対話ターミナルから人間が直接起動してください。", prov, op),
 				DocURL: docURL,
 			}
 		}
@@ -81,24 +90,19 @@ func Check(prov string, auth provider.AuthMode, op Op, cc CallContext) Decision 
 	return Decision{Allow: true}
 }
 
-// DetectCallContext inspects stdin TTY state and detects whether subcli is
+// DetectCallContext inspects stdin and stdout TTY state and detects whether subcli is
 // running underneath another AI coding agent.
 func DetectCallContext() CallContext {
-	under, hint := DetectUnderAgent()
+	under, hint, err := detectUnderAgent(os.Environ(), int32(os.Getpid()), listAncestorProcessNames)
 	return CallContext{
-		StdinIsTTY: isTerminal(os.Stdin),
-		UnderAgent: under,
-		AgentHint:  hint,
+		StdinIsTTY:    isTerminal(os.Stdin),
+		StdoutIsTTY:   isTerminal(os.Stdout),
+		AncestryError: err,
+		UnderAgent:    under,
+		AgentHint:     hint,
 	}
 }
 
 func isTerminal(f *os.File) bool {
-	if f == nil {
-		return false
-	}
-	fi, err := f.Stat()
-	if err != nil {
-		return false
-	}
-	return (fi.Mode() & os.ModeCharDevice) != 0
+	return f != nil && isatty.IsTerminal(f.Fd())
 }

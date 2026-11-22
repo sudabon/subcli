@@ -33,6 +33,10 @@ if [ -n "${FAKE_CLI_RECORD_CWD:-}" ]; then
     pwd > "$FAKE_CLI_RECORD_CWD"
 fi
 
+if [ -n "${FAKE_CLI_RECORD_STDIN:-}" ]; then
+    cat > "$FAKE_CLI_RECORD_STDIN"
+fi
+
 mode="${FAKE_CLI_CODEX_MODE:-${FAKE_CLI_MODE:-}}"
 exit_code="${FAKE_CLI_CODEX_EXIT_CODE:-${FAKE_CLI_EXIT_CODE:-0}}"
 

@@ -3,10 +3,10 @@ package policy
 import "github.com/sudabon/subcli/internal/provider"
 
 const (
-	urlAnthropicLegal      = "https://code.claude.com/docs/en/legal-and-compliance"
-	urlOpenAIAuth          = "https://developers.openai.com/codex/auth"
-	urlAntigravityFAQ      = "https://antigravity.google/docs/faq"
-	urlAntigravityForum    = "https://discuss.ai.google.dev/t/supported-gemini-subscription-access-for-a-third-party-vs-code-extension/189889/2"
+	urlAnthropicLegal   = "https://code.claude.com/docs/en/legal-and-compliance"
+	urlOpenAIAuth       = "https://developers.openai.com/codex/auth"
+	urlAntigravityFAQ   = "https://antigravity.google/docs/faq"
+	urlAntigravityForum = "https://discuss.ai.google.dev/t/supported-gemini-subscription-access-for-a-third-party-vs-code-extension/189889/2"
 )
 
 type matrixKey struct {
@@ -22,7 +22,7 @@ type matrixRule struct {
 	DocURL           string
 }
 
-// policyMatrix encodes the permission matrix from spce.md §2.3 as data.
+// policyMatrix encodes the permission matrix from the policy-guard specification as data.
 var policyMatrix = map[matrixKey]matrixRule{
 	// claude (subscription)
 	{"claude", provider.AuthSubscription, OpLogin}:   {Allow: true},

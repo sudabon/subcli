@@ -82,11 +82,13 @@ func newResumeCmd(deps *Deps) *cobra.Command {
 				Timeout: timeout,
 			})
 
-			if touchErr := store.Touch(cmd.Context(), rec.ID, deps.Now().UTC()); touchErr != nil {
-				deps.Logger.Warn("failed to update session last_run_at",
-					logging.Field{Key: "id", Value: rec.ID},
-					logging.Field{Key: "error", Value: touchErr.Error()},
-				)
+			if res.Started {
+				if touchErr := store.Touch(cmd.Context(), rec.ID, deps.Now().UTC()); touchErr != nil {
+					deps.Logger.Warn("failed to update session last_run_at",
+						logging.Field{Key: "id", Value: rec.ID},
+						logging.Field{Key: "error", Value: touchErr.Error()},
+					)
+				}
 			}
 
 			return finalizeHeadlessExit(deps, prov.ID(), res, runErr)

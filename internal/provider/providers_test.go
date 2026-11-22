@@ -3,8 +3,10 @@ package provider_test
 import (
 	"errors"
 	"reflect"
+	"slices"
 	"testing"
 
+	"github.com/sudabon/subcli/internal/event"
 	"github.com/sudabon/subcli/internal/provider"
 	"github.com/sudabon/subcli/internal/provider/agy"
 	"github.com/sudabon/subcli/internal/provider/claude"
@@ -165,4 +167,81 @@ func TestProviders_InteractiveMemoryAdapter(t *testing.T) {
 			t.Errorf("agy.InteractiveMemoryArgs = %v, want %v", args, want)
 		}
 	})
+}
+
+func TestHeadlessPromptIsPositional(t *testing.T) {
+	for _, p := range []provider.Provider{claude.New(""), codex.New("")} {
+		for _, prompt := range []string{"- item", "--dangerously-skip-permissions", "review", "-"} {
+			for _, session := range []string{"", "session-id"} {
+				args, err := p.HeadlessArgv(provider.RunRequest{Prompt: prompt, ProviderSessionID: session})
+				if err != nil {
+					t.Fatal(err)
+				}
+				want := []string{prompt}
+				if p.ID() == "codex" && session != "" {
+					want = []string{session, prompt}
+				}
+				i := slices.Index(args, "--")
+				if i < 0 || !slices.Equal(args[i+1:], want) {
+					t.Errorf("%s args %q, want positional args %q after --", p.ID(), args, want)
+				}
+			}
+		}
+	}
+}
+
+func TestParseReportsMalformedLines(t *testing.T) {
+	for _, tc := range []struct {
+		p    provider.Provider
+		line string
+	}{
+		{claude.New(""), "malformed"},
+		{claude.New(""), `{"type":"result","usage":"wrong type"}`},
+		{codex.New(""), "malformed"},
+		{codex.New(""), `{"type":"turn.completed","usage":"wrong type"}`},
+		{codex.New(""), `{"type":"item.completed","item":"wrong type"}`},
+	} {
+		evs, err := tc.p.Parse([]byte(tc.line))
+		if err == nil || len(evs) != 1 || evs[0].Kind != event.Unknown || len(evs[0].Raw) == 0 {
+			t.Errorf("%s.Parse(%q) = %v, %v; want unknown event and parse error", tc.p.ID(), tc.line, evs, err)
+		}
+	}
+}
+
+func TestValidateExtraArgsPermissionModes(t *testing.T) {
+	for _, args := range [][]string{
+		{"-a", "never"}, {"--ask-for-approval", "never"}, {"--ask-for-approval=never"},
+		{"-anever"}, {"-a=never"}, {"--permission-mode", "dontAsk"}, {"--permission-mode=dontAsk"},
+		{"--config", "approval_policy=never"}, {"-c", `approval_policy = "never"`},
+		{"--config=approval_policy='never'"}, {"-capproval_policy=never"},
+		{"-c", `approval_policy = "never" # policy`},
+		{"-dangerously-skip-permissions"},
+	} {
+		if err := provider.ValidateExtraArgs(args); err == nil {
+			t.Errorf("accepted %q", args)
+		}
+	}
+	for _, args := range [][]string{{"-a", "on-request"}, {"--permission-mode", "plan"}, {"--model", "never"}} {
+		if err := provider.ValidateExtraArgs(args); err != nil {
+			t.Errorf("rejected %q: %v", args, err)
+		}
+	}
+}
+
+func TestTerminalProviderErrors(t *testing.T) {
+	for _, tc := range []struct {
+		p     provider.Provider
+		line  string
+		fatal bool
+	}{
+		{claude.New(""), `{"type":"result","subtype":"success","is_error":true}`, true},
+		{codex.New(""), `{"type":"turn.failed","error":{"message":"failed"}}`, true},
+		{codex.New(""), `{"type":"error","message":"retrying"}`, false},
+		{codex.New(""), `{"type":"item.completed","item":{"type":"error","message":"warning"}}`, false},
+	} {
+		events, err := tc.p.Parse([]byte(tc.line))
+		if err != nil || len(events) != 1 || events[0].Kind != event.Error || events[0].TerminalError != tc.fatal {
+			t.Errorf("%s.Parse(%s) = %v, %v; want Error with TerminalError=%v", tc.p.ID(), tc.line, events, err, tc.fatal)
+		}
+	}
 }

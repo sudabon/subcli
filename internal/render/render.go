@@ -8,6 +8,8 @@ import (
 	"os"
 	"strings"
 
+	"github.com/mattn/go-isatty"
+
 	"github.com/sudabon/subcli/internal/event"
 	"github.com/sudabon/subcli/internal/provider"
 )
@@ -24,14 +26,7 @@ type Renderer interface {
 // IsTerminal reports whether w is backed by an interactive terminal character device.
 func IsTerminal(w io.Writer) bool {
 	f, ok := w.(*os.File)
-	if !ok || f == nil {
-		return false
-	}
-	fi, err := f.Stat()
-	if err != nil {
-		return false
-	}
-	return (fi.Mode() & os.ModeCharDevice) != 0
+	return ok && f != nil && isatty.IsTerminal(f.Fd())
 }
 
 // JSONLRenderer writes each normalized Event as a single JSON line.

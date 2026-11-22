@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/pelletier/go-toml/v2"
 	"github.com/sudabon/subcli/internal/event"
 )
 
@@ -78,6 +79,20 @@ type MemoryAdapter interface {
 	InteractiveMemoryEnv(env []string, mem MemoryContext) []string
 }
 
+// InteractiveArgs validates user-supplied arguments before adding the options
+// required by the provider's configured authentication mode.
+func InteractiveArgs(p Provider, auth AuthMode, extra []string) ([]string, error) {
+	if err := ValidateExtraArgs(extra); err != nil {
+		return nil, err
+	}
+	if adapter, ok := p.(interface {
+		InteractiveAuthArgs(AuthMode, []string) ([]string, error)
+	}); ok {
+		return adapter.InteractiveAuthArgs(auth, extra)
+	}
+	return p.InteractiveArgv(extra), nil
+}
+
 // Registry holds registered providers in deterministic insertion order.
 type Registry struct {
 	order     []string
@@ -130,15 +145,56 @@ var dangerousFlagTokens = []string{
 // ContainsDangerousFlag reports whether args include any flag or value that
 // bypasses official CLI permission or sandbox checks.
 func ContainsDangerousFlag(args []string) (string, bool) {
-	for _, arg := range args {
+	for i, arg := range args {
 		lower := strings.ToLower(arg)
+		// agy accepts single-dash long options as well as double-dash options.
+		if strings.HasPrefix(lower, "-dangerously-") {
+			lower = "-" + lower
+		}
 		for _, banned := range dangerousFlagTokens {
 			if strings.Contains(lower, strings.ToLower(banned)) {
 				return banned, true
 			}
 		}
+		name, value, inline := strings.Cut(lower, "=")
+		if !inline && i+1 < len(args) {
+			value = strings.ToLower(args[i+1])
+		}
+		switch name {
+		case "-a", "--ask-for-approval":
+			if value == "never" {
+				return name + " never", true
+			}
+		case "--permission-mode":
+			if value == "dontask" {
+				return "--permission-mode dontAsk", true
+			}
+		case "-anever", "--yolo":
+			return name, true
+		}
+		if disablesCodexApproval(arg) {
+			return "approval_policy=never", true
+		}
 	}
 	return "", false
+}
+
+// Codex config overrides take TOML values and fall back to literal strings.
+// The assignment can be a separate argument or attached to a config flag.
+func disablesCodexApproval(arg string) bool {
+	assignment := strings.TrimPrefix(arg, "--config=")
+	assignment = strings.TrimPrefix(strings.TrimPrefix(assignment, "-c"), "=")
+	key, value, ok := strings.Cut(assignment, "=")
+	if !ok || strings.TrimSpace(key) != "approval_policy" {
+		return false
+	}
+	if strings.TrimSpace(value) == "never" {
+		return true
+	}
+	var config struct {
+		ApprovalPolicy string `toml:"approval_policy"`
+	}
+	return toml.Unmarshal([]byte(assignment), &config) == nil && config.ApprovalPolicy == "never"
 }
 
 // ValidateExtraArgs rejects any dangerous permission-bypass flags in extra args.

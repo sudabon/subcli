@@ -22,15 +22,16 @@ const (
 
 // Event represents a provider-agnostic normalized event.
 type Event struct {
-	Provider  string          `json:"provider"`
-	Kind      Kind            `json:"kind"`
-	SessionID string          `json:"session_id,omitempty"`
-	Text      string          `json:"text,omitempty"`
-	ToolName  string          `json:"tool_name,omitempty"`
-	ToolInput json.RawMessage `json:"tool_input,omitempty"`
-	Usage     *UsageInfo      `json:"usage,omitempty"`
-	Raw       json.RawMessage `json:"raw"`
-	At        time.Time       `json:"at"`
+	Provider      string          `json:"provider"`
+	Kind          Kind            `json:"kind"`
+	TerminalError bool            `json:"-"` // The provider reports that the turn failed.
+	SessionID     string          `json:"session_id,omitempty"`
+	Text          string          `json:"text,omitempty"`
+	ToolName      string          `json:"tool_name,omitempty"`
+	ToolInput     json.RawMessage `json:"tool_input,omitempty"`
+	Usage         *UsageInfo      `json:"usage,omitempty"`
+	Raw           json.RawMessage `json:"raw"`
+	At            time.Time       `json:"at"`
 }
 
 // UsageInfo records token usage and optional reference cost.

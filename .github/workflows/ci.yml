@@ -24,3 +24,21 @@ jobs:
 
       - name: Build
         run: go build ./cmd/subcli
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Vet and build
+        run: |
+          go vet ./...
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go build ./cmd/subcli
+      - name: Test native Windows process handling
+        run: go test -v ./internal/runner ./internal/childcmd ./internal/policy -run 'TestWindows|TestRingBuffer'

@@ -57,11 +57,12 @@ func TestClaude_HeadlessArgv(t *testing.T) {
 			t.Fatalf("HeadlessArgv error: %v", err)
 		}
 		want := []string{
-			"-p", "summarize README",
+			"-p",
 			"--output-format", "stream-json",
 			"--verbose",
 			"--permission-mode", "plan",
 			"--model", "claude-sonnet-4",
+			"--", "summarize README",
 		}
 		if !reflect.DeepEqual(argv, want) {
 			t.Errorf("argv = %v, want %v", argv, want)
@@ -81,11 +82,12 @@ func TestClaude_HeadlessArgv(t *testing.T) {
 			t.Fatalf("HeadlessArgv error: %v", err)
 		}
 		want := []string{
-			"-p", "continue",
+			"-p",
 			"--output-format", "stream-json",
 			"--verbose",
 			"--permission-mode", "acceptEdits",
 			"--resume", "sess-abc-123",
+			"--", "continue",
 		}
 		if !reflect.DeepEqual(argv, want) {
 			t.Errorf("argv = %v, want %v", argv, want)
@@ -203,10 +205,25 @@ func TestClaude_ParseFixtures(t *testing.T) {
 		}
 	})
 
-	t.Run("unknown and malformed lines never fail Parse", func(t *testing.T) {
+	t.Run("string message content is accepted", func(t *testing.T) {
+		// The Messages API allows content to be a plain string instead of blocks.
+		evs, err := a.Parse([]byte(`{"type":"user","message":{"role":"user","content":"hi"}}`))
+		if err != nil || len(evs) != 1 || evs[0].Kind != event.Unknown {
+			t.Fatalf("user string content = %+v, %v; want 1 Unknown event and no error", evs, err)
+		}
+		evs, err = a.Parse([]byte(`{"type":"assistant","message":{"content":"hello"}}`))
+		if err != nil || len(evs) != 1 || evs[0].Kind != event.Text || evs[0].Text != "hello" {
+			t.Fatalf("assistant string content = %+v, %v; want 1 Text event", evs, err)
+		}
+		evs, err = a.Parse([]byte(`{"type":"assistant","message":{"content":null}}`))
+		if err != nil || len(evs) != 1 || evs[0].Kind != event.Unknown {
+			t.Fatalf("null content = %+v, %v; want 1 Unknown event", evs, err)
+		}
+	})
+
+	t.Run("unknown event types are preserved", func(t *testing.T) {
 		cases := []string{
 			`{"type":"brand_new_event","payload":{"k":"v"}}`,
-			`not-json-warning-line`,
 		}
 		for _, rawLine := range cases {
 			evs, err := a.Parse([]byte(rawLine))

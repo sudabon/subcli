@@ -6,15 +6,15 @@ OpenAI 公式 `codex` CLI を未改変のままヘッドレス（`codex exec`）
 ## Requirements
 
 ### Requirement: codex ヘッドレスおよび継続実行の引数構築
-`codex` アダプタは、Phase 0 で確認した `codex exec --help` 契約に基づき、ヘッドレス実行用の引数（`exec --json`、モデル指定時の `-m`、作業ディレクトリ指定時の `-C`、およびセッション継続時の `exec resume <session_id> ...`）を構築しなければならない（SHALL）。権限オプション `--perm` は `read-only` を `--sandbox read-only`、`edit` を `--sandbox workspace-write` に変換し、`danger-full-access` 等の権限確認バイパスフラグは出力してはならない（MUST NOT）。
+`codex` アダプタは、Phase 0 で確認した `codex exec --help` 契約に基づき、ヘッドレス実行用の引数（`exec --json`、モデル指定時の `-m`、およびセッション継続時の `exec resume --json [options] -- <session_id> <prompt>`）を構築しなければならない（SHALL）。権限オプション `--perm` は `read-only` を `--sandbox read-only`、`edit` を `--sandbox workspace-write` に変換し、`danger-full-access` 等の権限確認バイパスフラグは出力してはならない（MUST NOT）。
 
 #### Scenario: edit 権限および作業ディレクトリ指定での引数生成
 - **WHEN** `--cwd /path/to/repo` と `--perm edit` で `codex` のヘッドレス実行引数を生成する
-- **THEN** `exec`、`--json`、`-C /path/to/repo`、`--sandbox workspace-write` が含まれ、`danger-full-access` 等の危険フラグは含まれない
+- **THEN** 子プロセスは `/path/to/repo` で起動し、引数に `exec`、`--json`、`--sandbox workspace-write` と `-- <prompt>` が含まれ、`danger-full-access` 等の危険フラグは含まれない
 
 #### Scenario: セッション継続時の引数生成
 - **WHEN** 既存の `provider_session_id` を指定して `codex` の継続実行引数を生成する
-- **THEN** Phase 0 契約に準拠した順序で `exec resume <provider_session_id>` を含む引数が構築される
+- **THEN** Phase 0 契約に準拠した順序で `exec resume --json [options] -- <provider_session_id> <prompt>` を含む引数が構築される
 
 ### Requirement: codex 子プロセス環境変数の認証モード分離
 `codex` アダプタは、`auth = "subscription"` 時に子プロセス環境変数から `CODEX_API_KEY` および `OPENAI_API_KEY` を必ず除去しなければならない（MUST）。`auth = "api_key"` 時は設定で指定された環境変数から値を読み取り、その呼び出しに限って `CODEX_API_KEY` として子プロセスへ渡さなければならない（SHALL）。

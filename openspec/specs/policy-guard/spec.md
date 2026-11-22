@@ -6,7 +6,7 @@
 ## Requirements
 
 ### Requirement: 許可マトリクスによる実行前ポリシー判定
-システムは、プロバイダ・認証モード（`subscription` / `api_key`）・操作種別（`login`, `open`, `run`, `resume`, `compare`, `chain`）・実行コンテキスト（TTY の有無および他 AI エージェント配下かどうか）に基づき、あらゆる子プロセス起動の前に操作の可否を判定しなければならない（SHALL）。不許可と判定された場合、システムは子プロセスを一切起動せず、日本語の拒否理由と根拠となる公式ドキュメント URL を表示して非ゼロ終了コードで終了しなければならない（MUST）。
+システムは、プロバイダ・認証モード（`subscription` / `api_key`）・操作種別（`login`, `open`, `run`, `resume`, `compare`, `chain`）・実行コンテキスト（TTY の有無および他 AI エージェント配下かどうか）に基づき、これらの操作で公式 CLI の子プロセスを起動する前に操作の可否を判定しなければならない（SHALL）。不許可と判定された場合、システムは子プロセスを一切起動せず、日本語の拒否理由と根拠となる公式ドキュメント URL を表示して非ゼロ終了コードで終了しなければならない（MUST）。
 
 #### Scenario: claude / codex のサブスク認証で許可操作を実行する
 - **WHEN** `claude` または `codex` の `subscription` モードで `login`, `open`, `run`, `resume`, `compare`, `chain` のいずれかの可否を判定する
@@ -21,14 +21,14 @@
 - **THEN** ポリシー判定は許可を返す
 
 ### Requirement: agy サブスクの対話起動・ログインにおける TTY および非エージェント制約
-システムは、`agy` の `subscription` モードにおける `login` および `open` 操作を、標準入力が TTY であり、かつ他の AI エージェント配下で実行されていない場合にのみ許可しなければならない（SHALL）。
+システムは、`agy` の `subscription` モードにおける `login` および `open` 操作を、標準入力・標準出力がともに TTY であり、かつ他の AI エージェント配下で実行されていない場合にのみ許可しなければならない（SHALL）。
 
 #### Scenario: ターミナルから直接 agy を open する
-- **WHEN** ユーザーが標準入力が TTY であり他の AI エージェント配下ではない環境から `subcli open agy`（`auth=subscription`）を実行する
+- **WHEN** ユーザーが標準入力・標準出力がともに TTY であり他の AI エージェント配下ではない環境から `subcli open agy`（`auth=subscription`）を実行する
 - **THEN** ポリシー判定は許可を返す
 
 #### Scenario: 他の AI エージェント配下または非 TTY から agy を open / login する
-- **WHEN** Claude Code や Codex 等の他 AI エージェントのシェル実行ツール配下、または標準入力が非 TTY の環境から `subcli open agy` または `subcli login agy`（`auth=subscription`）を実行する
+- **WHEN** Claude Code や Codex 等の他 AI エージェントのシェル実行ツール配下、または標準入力・標準出力のいずれかが非 TTY、または祖先プロセスを確認できない環境から `subcli open agy` または `subcli login agy`（`auth=subscription`）を実行する
 - **THEN** ポリシー判定は拒否を返し、検出理由と公式参照 URL を表示して終了する
 
 ### Requirement: 他 AI エージェント配下実行のヒューリスティック検出

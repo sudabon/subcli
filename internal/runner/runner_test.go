@@ -41,8 +41,7 @@ func fakeEnv(t *testing.T, extra ...string) []string {
 	t.Helper()
 	fakeBin := filepath.Join(repoRoot(t), "testdata", "bin")
 	path := fakeBin + string(os.PathListSeparator) + os.Getenv("PATH")
-	env := append([]string{}, os.Environ()...)
-	env = provider.SetEnv(env, "PATH", path)
+	env := []string{"PATH=" + path}
 	for _, kv := range extra {
 		k, v, ok := strings.Cut(kv, "=")
 		if ok {
@@ -282,5 +281,60 @@ func TestRunner_FixtureReplay(t *testing.T) {
 		if !seen[want] {
 			t.Errorf("missing expected event kind %q (got %v)", want, kinds)
 		}
+	}
+}
+
+func TestRunnerMalformedResultIsReported(t *testing.T) {
+	fixture := filepath.Join(t.TempDir(), "invalid.ndjson")
+	if err := os.WriteFile(fixture, []byte("{\"type\":\"result\",\"usage\":\"unexpected\"}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	var events []event.Event
+	res, err := runner.Run(t.Context(), runner.Options{
+		BinPath: filepath.Join(repoRoot(t), "testdata", "bin", "claude"), Provider: claude.New(""),
+		Request: provider.RunRequest{Prompt: "hello"}, Auth: provider.AuthSubscription,
+		BaseEnv: fakeEnv(t, "FAKE_CLI_FIXTURE="+fixture), Logger: logging.NewWriter(&logs),
+		OnEvent: func(ev event.Event) { events = append(events, ev) },
+	})
+	if err == nil || res.ExitCode == 0 || !strings.Contains(logs.String(), "provider parse error") || len(events) != 1 || events[0].Kind != event.Unknown {
+		t.Fatalf("result = %+v, error = %v, events = %v, log = %s", res, err, events, logs.String())
+	}
+}
+
+func TestRunnerCodexDashPromptIsSentOnStdin(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake CLIs are POSIX shell scripts")
+	}
+	dir := t.TempDir()
+	stdinFile := filepath.Join(dir, "stdin")
+	argsFile := filepath.Join(dir, "args")
+	res, err := runner.Run(context.Background(), runner.Options{
+		BinPath:  filepath.Join(repoRoot(t), "testdata", "bin", "codex"),
+		Provider: codex.New(""),
+		Request:  provider.RunRequest{Prompt: "-", Perm: provider.PermReadOnly},
+		Auth:     provider.AuthSubscription,
+		BaseEnv: fakeEnv(t,
+			"FAKE_CLI_FIXTURE="+filepath.Join(repoRoot(t), "testdata", "codex", "success.ndjson"),
+			"FAKE_CLI_RECORD_STDIN="+stdinFile,
+			"FAKE_CLI_RECORD_ARGS="+argsFile,
+		),
+	})
+	if err != nil || res.ExitCode != 0 {
+		t.Fatalf("Run = %+v, %v; want success", res, err)
+	}
+	stdin, err := os.ReadFile(stdinFile)
+	if err != nil {
+		t.Fatalf("read recorded stdin: %v", err)
+	}
+	if string(stdin) != "-" {
+		t.Errorf("stdin = %q, want %q", stdin, "-")
+	}
+	args, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("read recorded args: %v", err)
+	}
+	if !strings.HasSuffix(string(args), "--\n-\n") {
+		t.Errorf("args = %q, want the prompt after --", args)
 	}
 }

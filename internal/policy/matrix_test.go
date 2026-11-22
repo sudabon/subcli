@@ -1,6 +1,8 @@
 package policy
 
 import (
+	"errors"
+	"os"
 	"strings"
 	"testing"
 
@@ -15,9 +17,11 @@ func TestPolicyMatrix(t *testing.T) {
 		name string
 		cc   CallContext
 	}{
-		{"direct_tty", CallContext{StdinIsTTY: true, UnderAgent: false}},
+		{"direct_tty", CallContext{StdinIsTTY: true, StdoutIsTTY: true, UnderAgent: false}},
+		{"redirected_stdout", CallContext{StdinIsTTY: true}},
+		{"unknown_ancestry", CallContext{StdinIsTTY: true, StdoutIsTTY: true, AncestryError: os.ErrPermission}},
 		{"non_tty", CallContext{StdinIsTTY: false, UnderAgent: false}},
-		{"under_agent_tty", CallContext{StdinIsTTY: true, UnderAgent: true, AgentHint: "env:CLAUDECODE"}},
+		{"under_agent_tty", CallContext{StdinIsTTY: true, StdoutIsTTY: true, UnderAgent: true, AgentHint: "env:CLAUDECODE"}},
 		{"under_agent_non_tty", CallContext{StdinIsTTY: false, UnderAgent: true, AgentHint: "process:codex"}},
 	}
 
@@ -31,7 +35,7 @@ func TestPolicyMatrix(t *testing.T) {
 			return true
 		case prov == "agy" && auth == provider.AuthSubscription:
 			if op == OpLogin || op == OpOpen {
-				return cc.StdinIsTTY && !cc.UnderAgent
+				return cc.StdinIsTTY && cc.StdoutIsTTY && !cc.UnderAgent && cc.AncestryError == nil
 			}
 			return false
 		default:
@@ -71,9 +75,33 @@ func TestPolicyMatrix(t *testing.T) {
 
 	// Unknown combinations must be denied safely.
 	t.Run("unknown_provider", func(t *testing.T) {
-		dec := Check("unknown", provider.AuthSubscription, OpOpen, CallContext{StdinIsTTY: true})
+		dec := Check("unknown", provider.AuthSubscription, OpOpen, CallContext{StdinIsTTY: true, StdoutIsTTY: true})
 		if dec.Allow || dec.Reason == "" || !strings.HasPrefix(dec.DocURL, "https://") {
 			t.Fatalf("unexpected decision for unknown provider: %+v", dec)
 		}
 	})
+}
+
+func TestNullDeviceIsNotTerminal(t *testing.T) {
+	f, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	stdin, stdout := os.Stdin, os.Stdout
+	os.Stdin, os.Stdout = f, f
+	defer func() { os.Stdin, os.Stdout = stdin, stdout }()
+	cc := DetectCallContext()
+	if cc.StdinIsTTY || cc.StdoutIsTTY {
+		t.Fatalf("%s detected as a terminal: %+v", os.DevNull, cc)
+	}
+}
+
+func TestIncompleteAncestry(t *testing.T) {
+	_, _, err := detectUnderAgent(nil, 123, func(int32, int) ([]string, error) {
+		return []string{"terminal"}, os.ErrPermission
+	})
+	if !errors.Is(err, os.ErrPermission) {
+		t.Fatalf("incomplete ancestry error = %v", err)
+	}
 }

@@ -23,7 +23,7 @@
 | `compare` | 同じプロンプトを複数プロバイダへ並列実行して比較 | ✅ | ✅ | ❌ ※2 |
 | `chain` | 前段の出力を次段の入力へ渡す 2〜3 段の直列連携 | ✅ | ✅ | ❌ ※2 |
 
-- **※1**: `agy`（サブスク）の `login` / `open` は、**対話ターミナルから人間が直接起動した場合（標準入力が TTY かつ他の AI エージェント配下でない場合）**のみ許可されます。Claude Code や Codex のシェルツール内から実行した場合は自動的に拒否されます。
+- **※1**: `agy`（サブスク）の `login` / `open` は、**対話ターミナルから人間が直接起動した場合（標準入力・標準出力がともに TTY で、他の AI エージェント配下でないことを確認できた場合）**のみ許可されます。Claude Code や Codex のシェルツール内から実行した場合は自動的に拒否されます。
 - **※2**: Google Antigravity のコンシューマー向けサブスクリプションでは、外部ツールからのヘッドレスラップや他 AI との自動連携が規約上の制限対象となるため、`subcli` 側で実行前に拒否します。
 
 ---
@@ -62,7 +62,7 @@ subcli login agy
 
 ### 3.1 `subcli doctor` — 環境と規約確認日の診断
 
-各公式 CLI のインストール場所・バージョン・公式ログイン状態（`claude` / `codex`）および [docs/COMPLIANCE.md](docs/COMPLIANCE.md) の規約確認日を表示します。確認日から **30 日以上** 経過している場合は再確認を促す警告を表示します。
+API キーモードで設定した環境変数が空の場合は、その変数名を表示します。各公式 CLI のインストール場所・バージョン・公式ログイン状態（`claude` / `codex`）および [docs/COMPLIANCE.md](docs/COMPLIANCE.md) の規約確認日を表示します。確認日から **30 日以上** 経過している場合は再確認を促す警告を表示します。
 
 ```bash
 subcli doctor
@@ -86,7 +86,7 @@ subcli login agy      # agy 対話サインインを起動（直接 TTY のみ�
 
 各公式 CLI の対話 TUI を起動します。Unix（macOS / Linux）では `syscall.Exec` により `subcli` プロセス自体を公式 CLI に置き換えるため、入出力の仲介を一切行いません。
 
-リポジトリルートに `.subcli/memory/MEMORY.md` が存在する場合、起動前に各プロバイダ向け投影を自動同期して共有メモリを接続します（`--no-memory` で無効化、`--memory` で未初期化時に自動作成＋`.gitignore` 追記）。
+Git が `.subcli` 配下を追跡しておらず、リポジトリルートに `.subcli/memory/MEMORY.md` が存在する場合、起動前に各プロバイダ向け投影を自動同期して共有メモリを接続します（`--no-memory` で無効化、`--memory` で未初期化時に自動作成＋`.gitignore` 追記）。
 
 ```bash
 # 基本的な起動（.subcli/memory/MEMORY.md があれば自動で共有メモリを接続）
@@ -111,7 +111,7 @@ subcli open codex -- -m o3
 
 ### 3.3.1 `subcli memory` — リポジトリローカル共有メモリの管理（チーム非共有）
 
-リポジトリルートに `.subcli/memory/` を作成し、`claude` / `codex` / `agy` の対話セッション間で同じリポジトリの記憶を共有します。初期化時にリポジトリルートの `.gitignore` へ `.subcli/` を自動追記するため、個人の作業メモリがチームへ共有されることはありません。
+リポジトリルートに `.subcli/memory/` を作成し、`claude` / `codex` / `agy` の対話セッション間で同じリポジトリの記憶を共有します。Git リポジトリで初期化すると、ルートの `.gitignore` へ `.subcli/` を自動追記するため、個人の作業メモリがチームへ共有されることはありません。
 
 #### ディレクトリ構成（リポジトリルート配下）
 
@@ -132,7 +132,7 @@ subcli open codex -- -m o3
 | プロバイダ | `subcli open` 時の接続方式 |
 | --- | --- |
 | **`claude`** | `--settings '{"autoMemoryDirectory":"<repo>/.subcli/memory"}'`（自動メモリの読み書き先を直接統一）＋ `--add-dir` と `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1` で投影 `CLAUDE.md` を読込 |
-| **`codex`** | `--add-dir <repo>/.subcli/memory` ＋ `-c developer_instructions=...` で共有メモリと更新ルールを起動時注入 |
+| **`codex`** | `--add-dir <repo>/.subcli/memory` ＋ `-c developer_instructions=...` で共有メモリと更新ルールを起動時注入。既知のキーパターンをマスクした本文がローカルのプロセス一覧に表示される場合があります |
 | **`agy`** | `--add-dir <repo>/.subcli/projections/agy` で投影 `AGENTS.md` をワークスペースルールとして自動読込（`agy` サブスクでも規約内で動作） |
 
 #### サブコマンド一覧
@@ -197,7 +197,7 @@ subcli run claude --no-store "Go の context.WithTimeout の使い方を簡潔�
 | `--no-store` | `false` | ローカルセッション DB へ保存しない |
 | `--timeout <duration>` | `30m` | 実行タイムアウト（例: `5m`, `90s`） |
 
-> **補足**: サブスクリプションモード実行時のコスト表示には「参考値（実際の請求ではありません）」と明記されます。実行中に `Ctrl+C` を押すと、子プロセスグループへ `SIGINT` →（5 秒後）`SIGTERM` →（5 秒後）`SIGKILL` の順で安全に停止します。
+> **補足**: サブスクリプションモード実行時のコスト表示には「参考値（実際の請求ではありません）」と明記されます。実行中に `Ctrl+C` を押すと、子プロセスグループへ `SIGINT` →（5 秒後）`SIGTERM` →（5 秒後）`SIGKILL` の順で安全に停止します。Windows では子プロセスを Job Object にまとめ、`CTRL_BREAK` を送って 5 秒以内に終了しなければ Job Object ごと強制終了します。
 
 ---
 
@@ -340,7 +340,7 @@ max_concurrency = 2
 
 `subcli` は以下の仕組みで規約違反や誤操作を防いでいます（詳細は [docs/COMPLIANCE.md](docs/COMPLIANCE.md) を参照）。
 
-1. **実行前ポリシーガード**: 全コマンドが子プロセス起動前に許可マトリクスと実行コンテキスト（TTY / 他 AI エージェント配下検出）を検査し、禁止操作は理由と公式参照 URL を表示して終了します。
+1. **実行前ポリシーガード**: `login`・`open`・`run`・`resume`・`compare`・`chain` が子プロセス起動前に許可マトリクスと実行コンテキスト（TTY / 他 AI エージェント配下検出）を検査し、禁止操作は理由と公式参照 URL を表示して終了します。
 2. **認証情報への非接触**: 各公式 CLI の認証ファイルや OS キーチェーンには一切アクセスしません。
 3. **意図しない API 課金の防止**: `auth = "subscription"` 時は、シェルに `ANTHROPIC_API_KEY`・`OPENAI_API_KEY`・`GEMINI_API_KEY` などが設定されていても子プロセスへ渡しません。
 4. **危険フラグの遮断**: 権限確認をバイパスする危険フラグ（`--dangerously-skip-permissions` 等）はすべての経路で拒否します。

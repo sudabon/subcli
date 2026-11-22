@@ -92,17 +92,17 @@ func newChainCmd(deps *Deps) *cobra.Command {
 				}
 			}
 
-			workDir := strings.TrimSpace(cwd)
-			if workDir == "" {
-				workDir, err = deps.Getwd()
-				if err != nil {
-					return fmt.Errorf("カレントディレクトリの取得に失敗しました: %w", err)
-				}
+			workDir, err := resolveWorkDir(deps, cwd)
+			if err != nil {
+				return err
 			}
 
 			baseEnv := deps.Environ()
 			chainSteps := make([]runner.ChainStep, 0, len(resolved))
 			for _, s := range resolved {
+				if err := validateAPIKey(s.pcfg, baseEnv); err != nil {
+					return err
+				}
 				req := provider.RunRequest{
 					Prompt: "validate",
 					Model:  model,
@@ -134,6 +134,7 @@ func newChainCmd(deps *Deps) *cobra.Command {
 
 			runCtx, cancelTimeout := context.WithTimeout(sigCtx, timeout)
 			defer cancelTimeout()
+			output := renderStatus{cancel: cancelTimeout}
 
 			isTTY := render.IsTerminal(deps.Stdout)
 			var jsonRenderer *render.ChainJSONLRenderer
@@ -146,26 +147,29 @@ func newChainCmd(deps *Deps) *cobra.Command {
 				Logger: deps.Logger,
 				OnStepStart: func(stepIndex, totalSteps int, provID string, auth provider.AuthMode, _ string) {
 					if !jsonOut {
-						_ = render.WriteChainStepHeader(deps.Stdout, stepIndex, totalSteps, provID, isTTY)
+						output.check(render.WriteChainStepHeader(deps.Stdout, stepIndex, totalSteps, provID, isTTY))
 						ttyRenderer = render.NewTTYRenderer(deps.Stdout, auth, isTTY)
 					}
 				},
 				OnEvent: func(stepIndex int, ev event.Event) {
 					if jsonOut {
-						_ = jsonRenderer.Render(stepIndex+1, ev)
+						output.check(jsonRenderer.Render(stepIndex+1, ev))
 						return
 					}
 					if ttyRenderer != nil {
-						_ = ttyRenderer.Render(ev)
+						output.check(ttyRenderer.Render(ev))
 					}
 				},
 				OnStepComplete: func(_, _ int, _ runner.ChainStepResult) {
 					if ttyRenderer != nil {
-						_ = ttyRenderer.Flush()
+						output.check(ttyRenderer.Flush())
 					}
 				},
 			})
 
+			if output.err != nil {
+				return output.err
+			}
 			return finalizeChainExit(deps, runErr)
 		},
 	}

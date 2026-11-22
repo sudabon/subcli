@@ -1,7 +1,9 @@
 package memory
 
 import (
+	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -302,5 +304,140 @@ func TestImportMarkdownDirAndDefaultPaths(t *testing.T) {
 	}
 	if codexPath != filepath.Join("/custom/codex", "memories") {
 		t.Errorf("DefaultImportDir(codex) = %q, want /custom/codex/memories", codexPath)
+	}
+}
+
+func TestTrackedMemoryUsesRepositoryIndex(t *testing.T) {
+	root := t.TempDir()
+	store := ForRoot(root, true)
+	runGit := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = root
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %s: %v", args, out, err)
+		}
+	}
+	runGit("init", "-q")
+	if _, err := store.Init(InitOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if tracked, err := store.HasTrackedMemory(); err != nil || tracked {
+		t.Fatalf("local memory: tracked=%v err=%v", tracked, err)
+	}
+	runGit("add", "-f", "--", ".subcli/projections/agy/AGENTS.md")
+	t.Setenv("GIT_INDEX_FILE", filepath.Join(t.TempDir(), "other-index"))
+	if tracked, err := store.HasTrackedMemory(); err != nil || !tracked {
+		t.Fatalf("tracked projection: tracked=%v err=%v", tracked, err)
+	}
+}
+
+func TestStoreRejectsLinkedPaths(t *testing.T) {
+	for _, rel := range []string{".subcli", ".subcli/memory", ".subcli/memory/MEMORY.md", ".subcli/projections", ".subcli/projections/claude", ".subcli/projections/agy/AGENTS.md"} {
+		t.Run(rel, func(t *testing.T) {
+			store := ForRoot(t.TempDir(), false)
+			if _, err := store.Init(InitOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(store.RepoRoot, rel)
+			moved := filepath.Join(t.TempDir(), "local")
+			if err := os.Rename(path, moved); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(moved, path); err != nil {
+				t.Skipf("symlinks unavailable: %v", err)
+			}
+			if _, err := store.BuildProviderContext("codex"); err == nil {
+				t.Error("generated context through linked path")
+			}
+			if _, err := store.Status(); err == nil {
+				t.Error("reported status for linked path")
+			}
+			if _, err := store.Init(InitOptions{}); err == nil {
+				t.Error("initialized through linked path")
+			}
+			if rel == ".subcli" || strings.HasPrefix(rel, ".subcli/memory") {
+				if _, err := store.ReadMain(); err == nil {
+					t.Error("read linked memory")
+				}
+			}
+		})
+	}
+}
+
+func TestImportSkipsLinkedMarkdown(t *testing.T) {
+	source := t.TempDir()
+	if err := os.WriteFile(filepath.Join(source, "entry.md"), []byte("kept"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("entry.md", filepath.Join(source, "linked.md")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	store := ForRoot(t.TempDir(), false)
+	res, err := store.ImportMarkdownDir(source, "claude", time.Time{}, InitOptions{})
+	if err != nil || len(res.ImportedFiles) != 1 || res.ImportedFiles[0] != "entry.md" {
+		t.Fatalf("imported %v, err=%v", res.ImportedFiles, err)
+	}
+	if _, err := os.Lstat(filepath.Join(store.RepoRoot, ".gitignore")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("unexpected .gitignore outside Git: %v", err)
+	}
+}
+
+func TestManualMemoryRedactedInAllProjections(t *testing.T) {
+	store := ForRoot(t.TempDir(), false)
+	if _, err := store.Init(InitOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	const example = "sk-ant-example1234567890abcd"
+	if err := os.WriteFile(store.MemoryFile, []byte("Example "+example), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, err := store.BuildProviderContext("codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	check := func(name, body string) {
+		t.Helper()
+		if !strings.Contains(body, "Example ") || strings.Contains(body, example) {
+			t.Errorf("%s omitted content or included the raw example key", name)
+		}
+	}
+	check("inline", ctx.InlinePrompt)
+	for name, file := range map[string]string{"claude": "CLAUDE.md", "agy": "AGENTS.md"} {
+		data, err := os.ReadFile(filepath.Join(store.ProjectionDir(name), file))
+		if err != nil {
+			t.Fatal(err)
+		}
+		check(name, string(data))
+	}
+}
+
+func TestPrivateWriteReplacesExistingFile(t *testing.T) {
+	store := ForRoot(t.TempDir(), false)
+	if _, err := store.Init(InitOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := store.statFile(store.MemoryFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.writePrivateFile(store.MemoryFile, []byte("replaced")); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Stat(store.MemoryFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if os.SameFile(before, after) {
+		t.Error("existing file was modified in place")
+	}
+	if runtime.GOOS != "windows" && after.Mode().Perm() != 0o600 {
+		t.Errorf("replacement permissions = %o, want 600", after.Mode().Perm())
+	}
+}
+
+func TestEncodeClaudeProjectKey(t *testing.T) {
+	if key := EncodeClaudeProjectKey("/repos/my_project.v1/開発"); key != "-repos-my-project-v1---" {
+		t.Errorf("unexpected project key %q", key)
 	}
 }

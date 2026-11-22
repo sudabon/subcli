@@ -132,8 +132,7 @@ func (a *Adapter) HeadlessArgv(req provider.RunRequest) ([]string, error) {
 		if model := strings.TrimSpace(req.Model); model != "" {
 			args = append(args, "-m", model)
 		}
-		args = append(args, sessID, req.Prompt)
-		return args, nil
+		return append(args, "--", sessID, req.Prompt), nil
 	}
 
 	args := []string{
@@ -144,11 +143,8 @@ func (a *Adapter) HeadlessArgv(req provider.RunRequest) ([]string, error) {
 	if model := strings.TrimSpace(req.Model); model != "" {
 		args = append(args, "-m", model)
 	}
-	if cwd := strings.TrimSpace(req.Cwd); cwd != "" {
-		args = append(args, "-C", cwd)
-	}
-	args = append(args, req.Prompt)
-	return args, nil
+	// The runner sets exec.Cmd.Dir for both new and resumed sessions.
+	return append(args, "--", req.Prompt), nil
 }
 
 func mapSandboxMode(perm provider.Perm) (string, error) {
@@ -213,8 +209,7 @@ type codexItem struct {
 }
 
 // Parse normalizes a single JSONL line from `codex exec --json` into zero or
-// more normalized events. Unknown or unparseable lines are preserved as
-// event.Unknown without returning an error.
+// more normalized events. Undecodable lines retain their raw data alongside the error.
 func (a *Adapter) Parse(line []byte) ([]event.Event, error) {
 	trimmed := bytes.TrimSpace(line)
 	if len(trimmed) == 0 {
@@ -226,7 +221,14 @@ func (a *Adapter) Parse(line []byte) ([]event.Event, error) {
 
 	var msg codexLine
 	if err := json.Unmarshal(trimmed, &msg); err != nil {
-		return []event.Event{event.NewUnknown(a.ID(), trimmed, at)}, nil
+		unknown := []event.Event{event.NewUnknown(a.ID(), trimmed, at)}
+		switch msg.Type {
+		case "", "thread.started", "item.started", "item.updated", "item.completed", "turn.completed", "turn.failed", "error":
+			return unknown, err
+		default:
+			// A future event type can reuse field names with a different schema.
+			return unknown, nil
+		}
 	}
 
 	switch msg.Type {
@@ -240,7 +242,11 @@ func (a *Adapter) Parse(line []byte) ([]event.Event, error) {
 		}}, nil
 
 	case "item.started", "item.updated", "item.completed":
-		return a.parseItemEvent(msg.Type, msg.Item, trimmed, raw, at), nil
+		var item codexItem
+		if err := json.Unmarshal(msg.Item, &item); err != nil {
+			return []event.Event{event.NewUnknown(a.ID(), trimmed, at)}, err
+		}
+		return a.parseItemEvent(msg.Type, item, msg.Item, raw, at), nil
 
 	case "turn.completed":
 		var events []event.Event
@@ -270,11 +276,12 @@ func (a *Adapter) Parse(line []byte) ([]event.Event, error) {
 			errMsg = msg.Error.Message
 		}
 		return []event.Event{{
-			Provider: a.ID(),
-			Kind:     event.Error,
-			Text:     errMsg,
-			Raw:      raw,
-			At:       at,
+			Provider:      a.ID(),
+			Kind:          event.Error,
+			TerminalError: true,
+			Text:          errMsg,
+			Raw:           raw,
+			At:            at,
 		}}, nil
 
 	case "error":
@@ -295,18 +302,10 @@ func (a *Adapter) Parse(line []byte) ([]event.Event, error) {
 	}
 }
 
-func (a *Adapter) parseItemEvent(eventType string, rawItem json.RawMessage, trimmed []byte, raw json.RawMessage, at time.Time) []event.Event {
-	if len(bytes.TrimSpace(rawItem)) == 0 {
-		return []event.Event{event.NewUnknown(a.ID(), trimmed, at)}
-	}
-	var item codexItem
-	if err := json.Unmarshal(rawItem, &item); err != nil {
-		return []event.Event{event.NewUnknown(a.ID(), trimmed, at)}
-	}
-
+func (a *Adapter) parseItemEvent(eventType string, item codexItem, rawItem, raw json.RawMessage, at time.Time) []event.Event {
 	switch item.Type {
 	case "agent_message":
-		if eventType == "item.completed" || item.Text != "" {
+		if eventType == "item.completed" {
 			return []event.Event{{
 				Provider: a.ID(),
 				Kind:     event.Text,
@@ -315,7 +314,7 @@ func (a *Adapter) parseItemEvent(eventType string, rawItem json.RawMessage, trim
 				At:       at,
 			}}
 		}
-		return []event.Event{event.NewUnknown(a.ID(), trimmed, at)}
+		return []event.Event{event.NewUnknown(a.ID(), raw, at)}
 
 	case "command_execution":
 		switch eventType {
@@ -339,7 +338,7 @@ func (a *Adapter) parseItemEvent(eventType string, rawItem json.RawMessage, trim
 				At:       at,
 			}}
 		default:
-			return []event.Event{event.NewUnknown(a.ID(), trimmed, at)}
+			return []event.Event{event.NewUnknown(a.ID(), raw, at)}
 		}
 
 	case "file_change", "mcp_tool_call", "web_search":
@@ -387,7 +386,7 @@ func (a *Adapter) parseItemEvent(eventType string, rawItem json.RawMessage, trim
 				At:       at,
 			}}
 		default:
-			return []event.Event{event.NewUnknown(a.ID(), trimmed, at)}
+			return []event.Event{event.NewUnknown(a.ID(), raw, at)}
 		}
 
 	case "error":
@@ -400,7 +399,7 @@ func (a *Adapter) parseItemEvent(eventType string, rawItem json.RawMessage, trim
 		}}
 
 	default:
-		return []event.Event{event.NewUnknown(a.ID(), trimmed, at)}
+		return []event.Event{event.NewUnknown(a.ID(), raw, at)}
 	}
 }
 

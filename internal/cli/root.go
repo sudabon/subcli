@@ -7,12 +7,14 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/sudabon/subcli/docs"
+	"github.com/sudabon/subcli/internal/childcmd"
 	"github.com/sudabon/subcli/internal/config"
 	"github.com/sudabon/subcli/internal/logging"
 	"github.com/sudabon/subcli/internal/policy"
@@ -20,6 +22,7 @@ import (
 	"github.com/sudabon/subcli/internal/provider/agy"
 	"github.com/sudabon/subcli/internal/provider/claude"
 	"github.com/sudabon/subcli/internal/provider/codex"
+	"github.com/sudabon/subcli/internal/runner"
 	"github.com/sudabon/subcli/internal/session"
 )
 
@@ -61,7 +64,10 @@ type Deps struct {
 
 // DefaultDeps returns production CLI dependencies.
 func DefaultDeps() Deps {
-	logger, _ := logging.OpenDefault()
+	logger, err := logging.OpenDefault()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "警告: ログファイルを開けませんでした: %v\n", err)
+	}
 	return Deps{
 		LoadConfig:     config.Load,
 		DetectContext:  policy.DetectCallContext,
@@ -172,46 +178,69 @@ func buildRegistry(cfg config.Config) *provider.Registry {
 }
 
 func defaultRunInteractive(ctx context.Context, binPath string, args []string, env []string, stdin io.Reader, stdout, stderr io.Writer) (int, error) {
-	cmd := exec.CommandContext(ctx, binPath, args...)
+	cmd, err := childcmd.CommandContext(ctx, binPath, args...)
+	if err != nil {
+		return 1, err
+	}
 	cmd.Stdin = stdin
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	cmd.Env = env
+	return runForeground(cmd)
+}
+
+// runForeground runs an interactive child that shares subcli's terminal. The
+// terminal delivers Ctrl+C to the child directly, so subcli ignores it while
+// waiting instead of exiting and leaving the child behind, then propagates the
+// child's exit status.
+func runForeground(cmd *exec.Cmd) (int, error) {
+	interrupt := make(chan os.Signal, 1)
+	signal.Notify(interrupt, os.Interrupt)
+	defer signal.Stop(interrupt)
 	err := cmd.Run()
 	if err == nil {
 		return 0, nil
 	}
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) {
-		return exitErr.ExitCode(), nil
+		return runner.ExitCodeFromError(err), nil
 	}
 	return 1, err
 }
 
 func defaultRunCapture(ctx context.Context, binPath string, args []string, env []string) (string, error) {
-	cmd := exec.CommandContext(ctx, binPath, args...)
+	cmd, err := childcmd.CommandContext(ctx, binPath, args...)
+	if err != nil {
+		return "", err
+	}
 	cmd.Env = env
 	out, err := cmd.CombinedOutput()
 	return strings.TrimSpace(string(out)), err
 }
 
 func defaultComplianceText() (string, string) {
-	cwd, err := os.Getwd()
-	if err == nil {
-		dir := cwd
-		for range 6 {
-			candidate := filepath.Join(dir, "docs", "COMPLIANCE.md")
-			if data, readErr := os.ReadFile(candidate); readErr == nil {
-				return string(data), candidate
-			}
-			parent := filepath.Dir(dir)
-			if parent == dir {
-				break
-			}
-			dir = parent
+	return docs.ComplianceMarkdown, "embedded docs/COMPLIANCE.md"
+}
+
+func validateAPIKey(pc config.ProviderConfig, env []string) error {
+	if pc.Auth == provider.AuthAPIKey {
+		value, _ := provider.LookupEnvSlice(env, pc.APIKeyEnv)
+		if strings.TrimSpace(value) == "" {
+			return fmt.Errorf("API キーモードには環境変数 %s の設定が必要です", pc.APIKeyEnv)
 		}
 	}
-	return docs.ComplianceMarkdown, "embedded docs/COMPLIANCE.md"
+	return nil
+}
+
+func resolveWorkDir(deps *Deps, cwd string) (string, error) {
+	if !filepath.IsAbs(cwd) {
+		base, err := deps.Getwd()
+		if err != nil {
+			return "", fmt.Errorf("カレントディレクトリの取得に失敗しました: %w", err)
+		}
+		cwd = filepath.Join(base, cwd)
+	}
+	return filepath.Abs(cwd)
 }
 
 func writePolicyDenied(deps *Deps, prov string, op policy.Op, dec policy.Decision) error {

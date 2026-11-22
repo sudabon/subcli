@@ -110,7 +110,7 @@ func (a *Adapter) HeadlessArgv(req provider.RunRequest) ([]string, error) {
 	}
 
 	args := []string{
-		"-p", req.Prompt,
+		"-p",
 		"--output-format", "stream-json",
 		"--verbose",
 		"--permission-mode", permMode,
@@ -121,7 +121,7 @@ func (a *Adapter) HeadlessArgv(req provider.RunRequest) ([]string, error) {
 	if sessID := strings.TrimSpace(req.ProviderSessionID); sessID != "" {
 		args = append(args, "--resume", sessID)
 	}
-	return args, nil
+	return append(args, "--", req.Prompt), nil
 }
 
 func mapPermissionMode(perm provider.Perm) (string, error) {
@@ -154,16 +154,16 @@ func (a *Adapter) ChildEnv(base []string, auth provider.AuthMode) []string {
 func (a *Adapter) NeedsPTY() bool { return false }
 
 type streamLine struct {
-	Type           string          `json:"type"`
-	Subtype        string          `json:"subtype"`
-	SessionID      string          `json:"session_id"`
-	IsError        bool            `json:"is_error"`
-	Result         string          `json:"result"`
-	TerminalReason string          `json:"terminal_reason"`
-	Errors         []string        `json:"errors"`
-	TotalCostUSD   *float64        `json:"total_cost_usd"`
-	Usage          *claudeUsage    `json:"usage"`
-	Message        *claudeMessage  `json:"message"`
+	Type           string         `json:"type"`
+	Subtype        string         `json:"subtype"`
+	SessionID      string         `json:"session_id"`
+	IsError        bool           `json:"is_error"`
+	Result         string         `json:"result"`
+	TerminalReason string         `json:"terminal_reason"`
+	Errors         []string       `json:"errors"`
+	TotalCostUSD   *float64       `json:"total_cost_usd"`
+	Usage          *claudeUsage   `json:"usage"`
+	Message        *claudeMessage `json:"message"`
 }
 
 type claudeUsage struct {
@@ -172,7 +172,29 @@ type claudeUsage struct {
 }
 
 type claudeMessage struct {
-	Content []claudeContentBlock `json:"content"`
+	Content claudeContent `json:"content"`
+}
+
+// claudeContent accepts both forms the Messages API allows for message
+// content: an array of blocks, or a plain string meaning a single text block.
+type claudeContent []claudeContentBlock
+
+func (c *claudeContent) UnmarshalJSON(data []byte) error {
+	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		*c = nil
+		return nil
+	}
+	var text string
+	if err := json.Unmarshal(data, &text); err == nil {
+		*c = claudeContent{{Type: "text", Text: text}}
+		return nil
+	}
+	var blocks []claudeContentBlock
+	if err := json.Unmarshal(data, &blocks); err != nil {
+		return err
+	}
+	*c = blocks
+	return nil
 }
 
 type claudeContentBlock struct {
@@ -184,8 +206,7 @@ type claudeContentBlock struct {
 }
 
 // Parse normalizes a single stream-json NDJSON line from the claude CLI into
-// zero or more normalized events. Unknown or unparseable lines are preserved as
-// event.Unknown without returning an error.
+// normalized events. Undecodable lines retain their raw data alongside the error.
 func (a *Adapter) Parse(line []byte) ([]event.Event, error) {
 	trimmed := bytes.TrimSpace(line)
 	if len(trimmed) == 0 {
@@ -197,7 +218,14 @@ func (a *Adapter) Parse(line []byte) ([]event.Event, error) {
 
 	var msg streamLine
 	if err := json.Unmarshal(trimmed, &msg); err != nil {
-		return []event.Event{event.NewUnknown(a.ID(), trimmed, at)}, nil
+		unknown := []event.Event{event.NewUnknown(a.ID(), trimmed, at)}
+		switch msg.Type {
+		case "", "system", "assistant", "user", "result":
+			return unknown, err
+		default:
+			// A future event type can reuse field names with a different schema.
+			return unknown, nil
+		}
 	}
 
 	switch msg.Type {
@@ -302,12 +330,13 @@ func (a *Adapter) Parse(line []byte) ([]event.Event, error) {
 				errText = msg.Subtype
 			}
 			events = append(events, event.Event{
-				Provider:  a.ID(),
-				Kind:      event.Error,
-				SessionID: msg.SessionID,
-				Text:      errText,
-				Raw:       raw,
-				At:        at,
+				Provider:      a.ID(),
+				Kind:          event.Error,
+				TerminalError: true,
+				SessionID:     msg.SessionID,
+				Text:          errText,
+				Raw:           raw,
+				At:            at,
 			})
 		} else {
 			events = append(events, event.Event{

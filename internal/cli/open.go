@@ -51,7 +51,8 @@ func runOpen(deps *Deps, providerID string, extra []string, opts openOpts) error
 		return fmt.Errorf("未対応のプロバイダです: %q", providerID)
 	}
 
-	if err := provider.ValidateExtraArgs(extra); err != nil {
+	extraArgs, err := provider.InteractiveArgs(p, pc.Auth, extra)
+	if err != nil {
 		return err
 	}
 
@@ -61,48 +62,29 @@ func runOpen(deps *Deps, providerID string, extra []string, opts openOpts) error
 		return writePolicyDenied(deps, p.ID(), policy.OpOpen, dec)
 	}
 
+	baseEnv := deps.Environ()
+	if err := validateAPIKey(pc, baseEnv); err != nil {
+		return err
+	}
+
 	binPath, err := deps.LookPath(p.Binary())
 	if err != nil {
 		return fmt.Errorf("公式 CLI %q が PATH に見つかりません: %w", p.Binary(), err)
 	}
 
-	extraArgs := p.InteractiveArgv(extra)
-	env := p.ChildEnv(deps.Environ(), pc.Auth)
-
+	env := p.ChildEnv(baseEnv, pc.Auth)
 	var memArgs []string
 	memoryAttached := false
-	if !opts.noMemory {
-		if memAdapter, supportsMem := p.(provider.MemoryAdapter); supportsMem {
-			if cwd, wdErr := deps.Getwd(); wdErr == nil && cwd != "" {
-				if store, openErr := memory.Open(cwd); openErr == nil {
-					if !store.Exists() && opts.initMemory {
-						initRes, initErr := store.Init(memory.InitOptions{SkipGitignore: opts.skipGitignore})
-						if initErr != nil {
-							return fmt.Errorf("共有メモリの初期化に失敗しました: %w", initErr)
-						}
-						if initRes.CreatedMemory {
-							fmt.Fprintf(deps.Stderr, "共有メモリを初期化しました: %s\n", initRes.MemoryFile)
-						}
-						if initRes.UpdatedGitignore {
-							fmt.Fprintf(deps.Stderr, ".gitignore に .subcli/ を追記しました\n")
-						}
-					}
-					if store.Exists() {
-						memCtx, ctxErr := store.BuildProviderContext(p.ID())
-						if ctxErr != nil {
-							return fmt.Errorf("共有メモリの同期に失敗しました: %w", ctxErr)
-						}
-						memArgs = memAdapter.InteractiveMemoryArgs(memCtx, extraArgs)
-						env = memAdapter.InteractiveMemoryEnv(env, memCtx)
-						memoryAttached = true
-					}
-				}
-			}
+	if adapter, ok := p.(provider.MemoryAdapter); ok && !opts.noMemory {
+		memCtx, err := openMemoryContext(deps, p.ID(), opts)
+		if err != nil {
+			return err
 		}
-	}
-
-	if err := provider.ValidateExtraArgs(memArgs); err != nil {
-		return err
+		if memCtx != nil {
+			memArgs = adapter.InteractiveMemoryArgs(*memCtx, extraArgs)
+			env = adapter.InteractiveMemoryEnv(env, *memCtx)
+			memoryAttached = true
+		}
 	}
 
 	argv := make([]string, 0, 1+len(memArgs)+len(extraArgs))
@@ -116,4 +98,46 @@ func runOpen(deps *Deps, providerID string, extra []string, opts openOpts) error
 		logging.Field{Key: "shared_memory", Value: fmt.Sprintf("%t", memoryAttached)},
 	)
 	return deps.ExecReplace(binPath, argv, env)
+}
+
+func openMemoryContext(deps *Deps, providerID string, opts openOpts) (*provider.MemoryContext, error) {
+	store, err := openRepoMemory(deps)
+	if err != nil {
+		return nil, err
+	}
+	initialized, err := store.Initialized()
+	if err != nil {
+		return nil, err
+	}
+	if !opts.initMemory && !initialized {
+		return nil, nil
+	}
+	tracked, err := store.HasTrackedMemory()
+	if err != nil {
+		return nil, err
+	}
+	if tracked {
+		if opts.initMemory {
+			return nil, fmt.Errorf("Git で追跡されている .subcli は共有メモリとして使用できません")
+		}
+		fmt.Fprintln(deps.Stderr, "Git で追跡されている .subcli の自動接続をスキップしました。")
+		return nil, nil
+	}
+	if !initialized {
+		res, err := store.Init(memory.InitOptions{SkipGitignore: opts.skipGitignore})
+		if err != nil {
+			return nil, fmt.Errorf("共有メモリの初期化に失敗しました: %w", err)
+		}
+		if res.CreatedMemory {
+			fmt.Fprintf(deps.Stderr, "共有メモリを初期化しました: %s\n", res.MemoryFile)
+		}
+		if res.UpdatedGitignore {
+			fmt.Fprintln(deps.Stderr, ".gitignore に .subcli/ を追記しました")
+		}
+	}
+	ctx, err := store.BuildProviderContext(providerID)
+	if err != nil {
+		return nil, fmt.Errorf("共有メモリの同期に失敗しました: %w", err)
+	}
+	return &ctx, nil
 }

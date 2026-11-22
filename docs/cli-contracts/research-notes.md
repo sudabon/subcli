@@ -47,7 +47,7 @@ modelProvider is set to "gemini" in settings.json, but the GEMINI_API_KEY enviro
 ### `testdata/agy/*.ndjson` 採取状況（Phase 4 への移管）
 
 - 本調査時点のローカル環境では `GEMINI_API_KEY` が未設定であったため、API キーモードによる `agy -p --output-format stream-json` の実機 fixture（`testdata/agy/{success,tool_use,error}.ndjson`）の採取は **`phase4-agy-api-key-mode` 着手時（API キー用意後）へ移管**する方針とした。
-- 規約方針（`docs/COMPLIANCE.md` および `spce.md` §2）に従い、サブスクリプション認証による `agy -p` の実行・採取は行っていない。
+- 規約方針（`docs/COMPLIANCE.md` §3）に従い、サブスクリプション認証による `agy -p` の実行・採取は行っていない。
 - Phase 4 着手時の採取コマンド例（`GEMINI_API_KEY` を設定したシェルで実行、`~/.gemini/antigravity-cli/settings.json` は変更不要）:
   ```bash
   agy --settings '{"modelProvider":"gemini"}' -p "Reply with exactly: hello" --output-format stream-json > testdata/agy/success.ndjson
@@ -111,13 +111,13 @@ modelProvider is set to "gemini" in settings.json, but the GEMINI_API_KEY enviro
 - **Antigravity CLI**: `ANTIGRAVITY_AGENT`, `ANTIGRAVITY_CONVERSATION_ID`, `ANTIGRAVITY_PROJECT_ID`, `ANTIGRAVITY_TRAJECTORY_ID`
 - **汎用 AI エージェント指標**: `AI_AGENT`
 
-※これに加え、`spce.md` §7.3 に従い `gopsutil` による親プロセスチェーン検査（`claude`, `codex`, `agy`, `opencode`, `openclaw`, `cursor-agent` 等）を併用する。
+※これに加え、`openspec/specs/policy-guard/spec.md` に従い `gopsutil` による親プロセスチェーン検査（`claude`, `codex`, `agy`, `opencode`, `openclaw`, `cursor-agent` 等）を併用する。
 
 ---
 
 ## 3. 後続 Phase 向けの CLI 契約・NDJSON スキーマ重要発見事項
 
-実機採取（`docs/cli-contracts/` および `testdata/`）を通じて、`spce.md` の想定に対して実装時に注意すべき実機仕様が確認された。
+実機採取（`docs/cli-contracts/` および `testdata/`）を通じて、当初の想定に対して実装時に注意すべき実機仕様が確認された。
 
 ### 3.1 公式ログイン・認証ステータス確認サブコマンド（Phase 1 `doctor` / `login` 向け）
 
@@ -147,7 +147,7 @@ modelProvider is set to "gemini" in settings.json, but the GEMINI_API_KEY enviro
   - **`"subtype": "success"`**（エラー時でも `subtype` が `"success"` になり得る）
 - また直前の `type="assistant"` 行にも `"error": "model_not_found"`, `"is_api_error_message": true` が含まれる。
 - **Phase 2 実装への影響**: `result` 行のエラー判定は `subtype` だけでなく `is_error == true` を必ずチェックすること。
-- その他、`type="system", subtype="thinking_tokens"`、`type="system", subtype="hook_started" / "hook_response"`、`type="rate_limit_event"`、`content[].type="thinking"` が実出力に現れるため、`Unknown` イベント保持設計（`spce.md` §6.1）で安全に扱うこと。
+- その他、`type="system", subtype="thinking_tokens"`、`type="system", subtype="hook_started" / "hook_response"`、`type="rate_limit_event"`、`content[].type="thinking"` が実出力に現れるため、`Unknown` イベント保持設計（`openspec/specs/provider-claude/spec.md`）で安全に扱うこと。
 
 ### 3.4 `codex exec --json` のイベント形式（Phase 2 パーサ向け）
 

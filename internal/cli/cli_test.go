@@ -10,7 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sudabon/subcli/internal/config"
 	"github.com/sudabon/subcli/internal/logging"
 	"github.com/sudabon/subcli/internal/policy"
 	"github.com/sudabon/subcli/internal/provider"
@@ -20,32 +19,30 @@ func TestDoctorCmd_OutputsAndComplianceWarning(t *testing.T) {
 	run := func(now time.Time, complianceMD string) (string, error) {
 		var stdout, stderr bytes.Buffer
 		var logBuf bytes.Buffer
-		deps := Deps{
-			LoadConfig: func() (config.Config, error) { return config.Default(), nil },
-			LookPath: func(file string) (string, error) {
-				if file == "codex" {
-					return "", errors.New("not found")
-				}
-				return "/usr/local/bin/" + file, nil
-			},
-			RunCapture: func(_ context.Context, binPath string, args []string, _ []string) (string, error) {
-				if len(args) == 1 && args[0] == "--version" {
-					return binPath + " 1.0.0", nil
-				}
-				if strings.HasSuffix(binPath, "/claude") && reflect.DeepEqual(args, []string{"auth", "status"}) {
-					return "Logged in as user@example.com", nil
-				}
-				return "", errors.New("unexpected command")
-			},
-			Environ: func() []string { return []string{"PATH=/usr/local/bin"} },
-			Now:     func() time.Time { return now },
-			ComplianceText: func() (string, string) {
-				return complianceMD, "docs/COMPLIANCE.md"
-			},
-			Logger: logging.NewWriter(&logBuf),
-			Stdout: &stdout,
-			Stderr: &stderr,
+		deps := testDeps(t)
+		deps.LookPath = func(file string) (string, error) {
+			if file == "codex" {
+				return "", errors.New("not found")
+			}
+			return "/usr/local/bin/" + file, nil
 		}
+		deps.RunCapture = func(_ context.Context, binPath string, args []string, _ []string) (string, error) {
+			if len(args) == 1 && args[0] == "--version" {
+				return binPath + " 1.0.0", nil
+			}
+			if strings.HasSuffix(binPath, "/claude") && reflect.DeepEqual(args, []string{"auth", "status"}) {
+				return "Logged in as user@example.com", nil
+			}
+			return "", errors.New("unexpected command")
+		}
+		deps.Environ = func() []string { return []string{"PATH=/usr/local/bin"} }
+		deps.Now = func() time.Time { return now }
+		deps.ComplianceText = func() (string, string) {
+			return complianceMD, "docs/COMPLIANCE.md"
+		}
+		deps.Logger = logging.NewWriter(&logBuf)
+		deps.Stdout = &stdout
+		deps.Stderr = &stderr
 		cmd := NewRootCmd(deps)
 		cmd.SetArgs([]string{"doctor"})
 		err := cmd.Execute()
@@ -94,32 +91,30 @@ func TestDoctorCmd_OutputsAndComplianceWarning(t *testing.T) {
 func TestDoctorCmd_JSONAuthStatusFormatting(t *testing.T) {
 	runWithClaudeStatus := func(claudeOut string, claudeErr error) (string, error) {
 		var stdout, stderr, logBuf bytes.Buffer
-		deps := Deps{
-			LoadConfig: func() (config.Config, error) { return config.Default(), nil },
-			LookPath: func(file string) (string, error) {
-				if file == "claude" {
-					return "/usr/local/bin/claude", nil
-				}
-				return "", errors.New("not found")
-			},
-			RunCapture: func(_ context.Context, _ string, args []string, _ []string) (string, error) {
-				if len(args) == 1 && args[0] == "--version" {
-					return "2.1.330 (Claude Code)", nil
-				}
-				if reflect.DeepEqual(args, []string{"auth", "status"}) {
-					return claudeOut, claudeErr
-				}
-				return "", errors.New("unexpected command")
-			},
-			Environ: func() []string { return []string{"PATH=/usr/local/bin"} },
-			Now:     func() time.Time { return time.Date(2026, 11, 22, 0, 0, 0, 0, time.UTC) },
-			ComplianceText: func() (string, string) {
-				return "# Compliance\nConfirmed-Date: 2026-11-22\n", "docs/COMPLIANCE.md"
-			},
-			Logger: logging.NewWriter(&logBuf),
-			Stdout: &stdout,
-			Stderr: &stderr,
+		deps := testDeps(t)
+		deps.LookPath = func(file string) (string, error) {
+			if file == "claude" {
+				return "/usr/local/bin/claude", nil
+			}
+			return "", errors.New("not found")
 		}
+		deps.RunCapture = func(_ context.Context, _ string, args []string, _ []string) (string, error) {
+			if len(args) == 1 && args[0] == "--version" {
+				return "2.1.330 (Claude Code)", nil
+			}
+			if reflect.DeepEqual(args, []string{"auth", "status"}) {
+				return claudeOut, claudeErr
+			}
+			return "", errors.New("unexpected command")
+		}
+		deps.Environ = func() []string { return []string{"PATH=/usr/local/bin"} }
+		deps.Now = func() time.Time { return time.Date(2026, 11, 22, 0, 0, 0, 0, time.UTC) }
+		deps.ComplianceText = func() (string, string) {
+			return "# Compliance\nConfirmed-Date: 2026-11-22\n", "docs/COMPLIANCE.md"
+		}
+		deps.Logger = logging.NewWriter(&logBuf)
+		deps.Stdout = &stdout
+		deps.Stderr = &stderr
 		cmd := NewRootCmd(deps)
 		cmd.SetArgs([]string{"doctor"})
 		err := cmd.Execute()
@@ -174,21 +169,17 @@ func TestLoginCmd(t *testing.T) {
 		var gotArgs []string
 		var gotEnv []string
 
-		deps := Deps{
-			LoadConfig:    func() (config.Config, error) { return config.Default(), nil },
-			DetectContext: func() policy.CallContext { return policy.CallContext{StdinIsTTY: true, UnderAgent: false} },
-			LookPath:      func(file string) (string, error) { return "/usr/local/bin/" + file, nil },
-			RunInteractive: func(_ context.Context, binPath string, args []string, env []string, _ io.Reader, _, _ io.Writer) (int, error) {
-				gotBin = binPath
-				gotArgs = args
-				gotEnv = env
-				return 0, nil
-			},
-			Environ: func() []string { return []string{"PATH=/usr/local/bin", "OPENAI_API_KEY=sk-should-be-stripped"} },
-			Logger:  logging.NewWriter(&bytes.Buffer{}),
-			Stdout:  &stdout,
-			Stderr:  &stderr,
+		deps := testDeps(t)
+		deps.LookPath = func(file string) (string, error) { return "/usr/local/bin/" + file, nil }
+		deps.RunInteractive = func(_ context.Context, binPath string, args []string, env []string, _ io.Reader, _, _ io.Writer) (int, error) {
+			gotBin = binPath
+			gotArgs = args
+			gotEnv = env
+			return 0, nil
 		}
+		deps.Environ = func() []string { return []string{"PATH=/usr/local/bin", "OPENAI_API_KEY=sk-should-be-stripped"} }
+		deps.Stdout = &stdout
+		deps.Stderr = &stderr
 
 		cmd := NewRootCmd(deps)
 		cmd.SetArgs([]string{"login", "codex"})
@@ -208,18 +199,14 @@ func TestLoginCmd(t *testing.T) {
 
 	t.Run("non-zero login exit code propagated", func(t *testing.T) {
 		var stdout, stderr bytes.Buffer
-		deps := Deps{
-			LoadConfig:    func() (config.Config, error) { return config.Default(), nil },
-			DetectContext: func() policy.CallContext { return policy.CallContext{StdinIsTTY: true} },
-			LookPath:      func(file string) (string, error) { return "/usr/local/bin/" + file, nil },
-			RunInteractive: func(_ context.Context, _ string, _ []string, _ []string, _ io.Reader, _, _ io.Writer) (int, error) {
-				return 2, nil
-			},
-			Environ: func() []string { return nil },
-			Logger:  logging.NewWriter(&bytes.Buffer{}),
-			Stdout:  &stdout,
-			Stderr:  &stderr,
+		deps := testDeps(t)
+		deps.LookPath = func(file string) (string, error) { return "/usr/local/bin/" + file, nil }
+		deps.RunInteractive = func(_ context.Context, _ string, _ []string, _ []string, _ io.Reader, _, _ io.Writer) (int, error) {
+			return 2, nil
 		}
+		deps.Environ = func() []string { return nil }
+		deps.Stdout = &stdout
+		deps.Stderr = &stderr
 		cmd := NewRootCmd(deps)
 		cmd.SetArgs([]string{"login", "claude"})
 		err := cmd.Execute()
@@ -235,24 +222,21 @@ func TestLoginCmd(t *testing.T) {
 	t.Run("agy subscription login denied under agent without launching CLI", func(t *testing.T) {
 		var stdout, stderr bytes.Buffer
 		called := false
-		deps := Deps{
-			LoadConfig: func() (config.Config, error) { return config.Default(), nil },
-			DetectContext: func() policy.CallContext {
-				return policy.CallContext{StdinIsTTY: true, UnderAgent: true, AgentHint: "env:CLAUDECODE"}
-			},
-			LookPath: func(file string) (string, error) {
-				called = true
-				return "/usr/local/bin/" + file, nil
-			},
-			RunInteractive: func(_ context.Context, _ string, _ []string, _ []string, _ io.Reader, _, _ io.Writer) (int, error) {
-				called = true
-				return 0, nil
-			},
-			Environ: func() []string { return nil },
-			Logger:  logging.NewWriter(&bytes.Buffer{}),
-			Stdout:  &stdout,
-			Stderr:  &stderr,
+		deps := testDeps(t)
+		deps.DetectContext = func() policy.CallContext {
+			return policy.CallContext{StdinIsTTY: true, UnderAgent: true, AgentHint: "env:CLAUDECODE"}
 		}
+		deps.LookPath = func(file string) (string, error) {
+			called = true
+			return "/usr/local/bin/" + file, nil
+		}
+		deps.RunInteractive = func(_ context.Context, _ string, _ []string, _ []string, _ io.Reader, _, _ io.Writer) (int, error) {
+			called = true
+			return 0, nil
+		}
+		deps.Environ = func() []string { return nil }
+		deps.Stdout = &stdout
+		deps.Stderr = &stderr
 
 		cmd := NewRootCmd(deps)
 		cmd.SetArgs([]string{"login", "agy"})
@@ -276,21 +260,17 @@ func TestOpenCmd(t *testing.T) {
 		var gotArgv []string
 		var gotEnv []string
 
-		deps := Deps{
-			LoadConfig:    func() (config.Config, error) { return config.Default(), nil },
-			DetectContext: func() policy.CallContext { return policy.CallContext{StdinIsTTY: true, UnderAgent: false} },
-			LookPath:      func(file string) (string, error) { return "/usr/local/bin/" + file, nil },
-			ExecReplace: func(binPath string, argv []string, env []string) error {
-				gotBin = binPath
-				gotArgv = argv
-				gotEnv = env
-				return nil
-			},
-			Environ: func() []string { return []string{"PATH=/usr/bin", "ANTHROPIC_API_KEY=sk-ant-should-be-stripped"} },
-			Logger:  logging.NewWriter(&bytes.Buffer{}),
-			Stdout:  &bytes.Buffer{},
-			Stderr:  &bytes.Buffer{},
+		deps := testDeps(t)
+		deps.LookPath = func(file string) (string, error) { return "/usr/local/bin/" + file, nil }
+		deps.ExecReplace = func(binPath string, argv []string, env []string) error {
+			gotBin = binPath
+			gotArgv = argv
+			gotEnv = env
+			return nil
 		}
+		deps.Environ = func() []string { return []string{"PATH=/usr/bin", "ANTHROPIC_API_KEY=sk-ant-should-be-stripped"} }
+		deps.Stdout = &bytes.Buffer{}
+		deps.Stderr = &bytes.Buffer{}
 
 		cmd := NewRootCmd(deps)
 		cmd.SetArgs([]string{"open", "claude", "--", "--model", "sonnet"})
@@ -312,21 +292,18 @@ func TestOpenCmd(t *testing.T) {
 	t.Run("open agy under agent is denied before exec", func(t *testing.T) {
 		var stderr bytes.Buffer
 		execCalled := false
-		deps := Deps{
-			LoadConfig: func() (config.Config, error) { return config.Default(), nil },
-			DetectContext: func() policy.CallContext {
-				return policy.CallContext{StdinIsTTY: true, UnderAgent: true, AgentHint: "env:CLAUDECODE"}
-			},
-			LookPath: func(file string) (string, error) { return "/usr/local/bin/" + file, nil },
-			ExecReplace: func(_ string, _ []string, _ []string) error {
-				execCalled = true
-				return nil
-			},
-			Environ: func() []string { return nil },
-			Logger:  logging.NewWriter(&bytes.Buffer{}),
-			Stdout:  &bytes.Buffer{},
-			Stderr:  &stderr,
+		deps := testDeps(t)
+		deps.DetectContext = func() policy.CallContext {
+			return policy.CallContext{StdinIsTTY: true, UnderAgent: true, AgentHint: "env:CLAUDECODE"}
 		}
+		deps.LookPath = func(file string) (string, error) { return "/usr/local/bin/" + file, nil }
+		deps.ExecReplace = func(_ string, _ []string, _ []string) error {
+			execCalled = true
+			return nil
+		}
+		deps.Environ = func() []string { return nil }
+		deps.Stdout = &bytes.Buffer{}
+		deps.Stderr = &stderr
 
 		cmd := NewRootCmd(deps)
 		cmd.SetArgs([]string{"open", "agy"})
@@ -345,19 +322,15 @@ func TestOpenCmd(t *testing.T) {
 
 	t.Run("dangerous flag rejected in extra args", func(t *testing.T) {
 		execCalled := false
-		deps := Deps{
-			LoadConfig:    func() (config.Config, error) { return config.Default(), nil },
-			DetectContext: func() policy.CallContext { return policy.CallContext{StdinIsTTY: true} },
-			LookPath:      func(file string) (string, error) { return "/usr/local/bin/" + file, nil },
-			ExecReplace: func(_ string, _ []string, _ []string) error {
-				execCalled = true
-				return nil
-			},
-			Environ: func() []string { return nil },
-			Logger:  logging.NewWriter(&bytes.Buffer{}),
-			Stdout:  &bytes.Buffer{},
-			Stderr:  &bytes.Buffer{},
+		deps := testDeps(t)
+		deps.LookPath = func(file string) (string, error) { return "/usr/local/bin/" + file, nil }
+		deps.ExecReplace = func(_ string, _ []string, _ []string) error {
+			execCalled = true
+			return nil
 		}
+		deps.Environ = func() []string { return nil }
+		deps.Stdout = &bytes.Buffer{}
+		deps.Stderr = &bytes.Buffer{}
 
 		cmd := NewRootCmd(deps)
 		cmd.SetArgs([]string{"open", "claude", "--", "--dangerously-skip-permissions"})

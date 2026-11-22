@@ -37,12 +37,10 @@ func (r *RingBuffer) Write(p []byte) (int, error) {
 	}
 
 	if n >= r.cap {
+		r.truncated = r.truncated || n > r.cap || r.pos != 0 || r.full
 		copy(r.buf, p[n-r.cap:])
 		r.pos = 0
 		r.full = true
-		if n > r.cap || r.pos > 0 {
-			r.truncated = true
-		}
 		return n, nil
 	}
 

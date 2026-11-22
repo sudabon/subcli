@@ -68,12 +68,9 @@ func newRunCmd(deps *Deps) *cobra.Command {
 				return writePolicyDenied(deps, prov.ID(), policy.OpRun, dec)
 			}
 
-			workDir := strings.TrimSpace(cwd)
-			if workDir == "" {
-				workDir, err = deps.Getwd()
-				if err != nil {
-					return fmt.Errorf("カレントディレクトリの取得に失敗しました: %w", err)
-				}
+			workDir, err := resolveWorkDir(deps, cwd)
+			if err != nil {
+				return err
 			}
 
 			req := provider.RunRequest{
@@ -88,7 +85,11 @@ func newRunCmd(deps *Deps) *cobra.Command {
 				Timeout: timeout,
 			})
 
-			if !noStore && providerSessionID != "" {
+			if !noStore && runErr == nil && res.ExitCode == 0 {
+				if providerSessionID == "" {
+					fmt.Fprintln(deps.Stderr, "警告: プロバイダからセッション ID が返らなかったため、セッションを保存できませんでした。")
+					return nil
+				}
 				store, storeErr := deps.OpenStore()
 				if storeErr != nil {
 					deps.Logger.Warn("failed to open session store", logging.Field{Key: "error", Value: storeErr.Error()})
@@ -150,6 +151,11 @@ func executeHeadless(
 	req provider.RunRequest,
 	opts headlessExecOpts,
 ) (runner.Result, string, error) {
+	baseEnv := deps.Environ()
+	if err := validateAPIKey(pcfg, baseEnv); err != nil {
+		return runner.Result{ExitCode: 1}, "", err
+	}
+
 	// Validate arguments before resolving or launching the binary.
 	if _, err := prov.HeadlessArgv(req); err != nil {
 		return runner.Result{ExitCode: 1}, "", err
@@ -173,23 +179,40 @@ func executeHeadless(
 	runCtx, cancelTimeout := context.WithTimeout(sigCtx, opts.Timeout)
 	defer cancelTimeout()
 
+	output := renderStatus{cancel: cancelTimeout}
 	var providerSessionID string
 	res, runErr := runner.Run(runCtx, runner.Options{
 		BinPath:  binPath,
 		Provider: prov,
 		Request:  req,
 		Auth:     pcfg.Auth,
-		BaseEnv:  deps.Environ(),
+		BaseEnv:  baseEnv,
 		Logger:   deps.Logger,
 		OnEvent: func(ev event.Event) {
 			if providerSessionID == "" && ev.SessionID != "" {
 				providerSessionID = ev.SessionID
 			}
-			_ = renderer.Render(ev)
+			output.check(renderer.Render(ev))
 		},
 	})
-	_ = renderer.Flush()
+	output.check(renderer.Flush())
+	if output.err != nil {
+		return res, providerSessionID, output.err
+	}
 	return res, providerSessionID, runErr
+}
+
+// Renderer callbacks are serialized by each runner. Stop child processes when output fails.
+type renderStatus struct {
+	err    error
+	cancel context.CancelFunc
+}
+
+func (r *renderStatus) check(err error) {
+	if err != nil && r.err == nil {
+		r.err = fmt.Errorf("出力の書き込みに失敗しました: %w", err)
+		r.cancel()
+	}
 }
 
 func finalizeHeadlessExit(deps *Deps, provID string, res runner.Result, runErr error) error {
@@ -198,6 +221,12 @@ func finalizeHeadlessExit(deps *Deps, provID string, res runner.Result, runErr e
 		if !strings.HasSuffix(res.Stderr, "\n") {
 			fmt.Fprintln(deps.Stderr)
 		}
+	}
+	if runErr != nil && !errors.Is(runErr, context.Canceled) && !errors.Is(runErr, context.DeadlineExceeded) {
+		if errors.Is(runErr, provider.ErrUnsupported) {
+			return fmt.Errorf("%s はヘッドレス実行に対応していません", provID)
+		}
+		return runErr
 	}
 	if res.TimedOut {
 		fmt.Fprintf(deps.Stderr, "%s の実行がタイムアウトしました。\n", provID)
@@ -213,12 +242,6 @@ func finalizeHeadlessExit(deps *Deps, provID string, res runner.Result, runErr e
 			code = 130
 		}
 		return &ExitError{Code: code, Silent: true}
-	}
-	if runErr != nil {
-		if errors.Is(runErr, provider.ErrUnsupported) {
-			return fmt.Errorf("%s はヘッドレス実行に対応していません", provID)
-		}
-		return runErr
 	}
 	if res.ExitCode != 0 {
 		return &ExitError{Code: res.ExitCode, Silent: true}

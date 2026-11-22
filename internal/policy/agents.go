@@ -1,15 +1,19 @@
 package policy
 
 import (
-	"os"
+	"errors"
+	"fmt"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/shirou/gopsutil/v4/process"
 )
 
-// MaxAncestorDepth limits parent process chain traversal to 10 hops (spce.md §7.3).
+// MaxAncestorDepth limits parent process chain traversal to 10 hops.
 const MaxAncestorDepth = 10
+
+var errAncestorDepth = errors.New("ancestor depth limit reached before the process-tree root")
 
 // knownAgentEnvVars lists environment variables confirmed during Phase 0
 // (docs/cli-contracts/research-notes.md §2.4). Only variable names are checked;
@@ -50,32 +54,22 @@ var knownAgentProcessNames = map[string]struct{}{
 	"cursor-agent": {},
 }
 
-// DetectUnderAgent reports whether the current process appears to be running
-// underneath another AI agent, returning a human-readable detection hint.
-func DetectUnderAgent() (bool, string) {
-	return detectUnderAgent(os.Environ(), int32(os.Getpid()), listAncestorProcessNames)
-}
-
-func detectUnderAgent(environ []string, pid int32, ancestorsFn func(pid int32, maxDepth int) ([]string, error)) (bool, string) {
+func detectUnderAgent(environ []string, pid int32, ancestorsFn func(pid int32, maxDepth int) ([]string, error)) (bool, string, error) {
 	if envName, ok := detectAgentEnv(environ); ok {
-		return true, "env:" + envName
+		return true, "env:" + envName, nil
 	}
-	if ancestorsFn != nil {
-		names, err := ancestorsFn(pid, MaxAncestorDepth)
-		if err == nil {
-			limit := len(names)
-			if limit > MaxAncestorDepth {
-				limit = MaxAncestorDepth
-			}
-			for _, raw := range names[:limit] {
-				norm := normalizeProcessName(raw)
-				if _, match := knownAgentProcessNames[norm]; match {
-					return true, "process:" + norm
-				}
-			}
+	names, err := ancestorsFn(pid, MaxAncestorDepth)
+	if len(names) > MaxAncestorDepth {
+		names = names[:MaxAncestorDepth]
+		err = errAncestorDepth
+	}
+	for _, raw := range names {
+		norm := normalizeProcessName(raw)
+		if _, match := knownAgentProcessNames[norm]; match {
+			return true, "process:" + norm, nil
 		}
 	}
-	return false, ""
+	return false, "", err
 }
 
 func detectAgentEnv(environ []string) (string, bool) {
@@ -121,27 +115,65 @@ func listAncestorProcessNames(pid int32, maxDepth int) ([]string, error) {
 	visited := map[int32]struct{}{pid: {}}
 	names := make([]string, 0, maxDepth)
 
+	if runtime.GOOS != "windows" && pid == 1 {
+		return names, nil
+	}
 	for depth := 0; depth < maxDepth; depth++ {
 		ppid, err := cur.Ppid()
-		if err != nil || ppid <= 0 {
-			break
+		if err != nil {
+			return names, err
+		}
+		// PID 4 is the Windows System process and may be inaccessible.
+		if runtime.GOOS == "windows" && ppid == 4 {
+			return names, nil
+		}
+		if ppid <= 0 {
+			return names, fmt.Errorf("parent PID unavailable for %d", cur.Pid)
 		}
 		if _, seen := visited[ppid]; seen {
-			break
+			return names, fmt.Errorf("cyclic process ancestry at PID %d", ppid)
 		}
 		visited[ppid] = struct{}{}
 
 		parent, err := process.NewProcess(ppid)
+		if runtime.GOOS == "windows" && errors.Is(err, process.ErrorProcessNotRunning) {
+			// Windows never re-parents orphans, so an exited parent (for example
+			// the userinit.exe that started explorer.exe) is the tree root.
+			return names, nil
+		}
 		if err != nil {
-			break
+			return names, err
 		}
-		if name, err := parent.Name(); err == nil && name != "" {
-			names = append(names, name)
+		if runtime.GOOS == "windows" && startedAfter(parent, cur) {
+			// The parent PID was reused by a newer, unrelated process.
+			return names, nil
 		}
-		if ppid == 1 {
-			break
+		name, err := parent.Name()
+		if err != nil {
+			return names, err
+		}
+		if name == "" {
+			return names, errors.New("ancestor process name unavailable")
+		}
+		names = append(names, name)
+		if runtime.GOOS != "windows" && ppid == 1 {
+			return names, nil
 		}
 		cur = parent
 	}
-	return names, nil
+	return names, errAncestorDepth
+}
+
+// startedAfter reports whether parent provably started after child. Unknown
+// creation times return false so the walk continues instead of stopping early.
+func startedAfter(parent, child *process.Process) bool {
+	parentStart, err := parent.CreateTime()
+	if err != nil {
+		return false
+	}
+	childStart, err := child.CreateTime()
+	if err != nil {
+		return false
+	}
+	return parentStart > childStart
 }

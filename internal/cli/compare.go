@@ -83,17 +83,17 @@ func newCompareCmd(deps *Deps) *cobra.Command {
 				}
 			}
 
-			workDir := strings.TrimSpace(cwd)
-			if workDir == "" {
-				workDir, err = deps.Getwd()
-				if err != nil {
-					return fmt.Errorf("カレントディレクトリの取得に失敗しました: %w", err)
-				}
+			workDir, err := resolveWorkDir(deps, cwd)
+			if err != nil {
+				return err
 			}
 
 			baseEnv := deps.Environ()
 			targets := make([]runner.CompareTarget, 0, len(participants))
 			for _, p := range participants {
+				if err := validateAPIKey(p.pcfg, baseEnv); err != nil {
+					return err
+				}
 				req := provider.RunRequest{
 					Prompt: prompt,
 					Model:  model,
@@ -125,13 +125,14 @@ func newCompareCmd(deps *Deps) *cobra.Command {
 
 			runCtx, cancelTimeout := context.WithTimeout(sigCtx, timeout)
 			defer cancelTimeout()
+			output := renderStatus{cancel: cancelTimeout}
 
 			var jsonRenderer *render.CompareJSONLRenderer
 			var onEvent func(runner.CompareEvent)
 			if jsonOut {
 				jsonRenderer = render.NewCompareJSONLRenderer(deps.Stdout)
 				onEvent = func(ce runner.CompareEvent) {
-					_ = jsonRenderer.Render(ce.Index, ce.Event)
+					output.check(jsonRenderer.Render(ce.Index, ce.Event))
 				}
 			}
 
@@ -140,15 +141,19 @@ func newCompareCmd(deps *Deps) *cobra.Command {
 				OnEvent: onEvent,
 			})
 
+			if output.err != nil {
+				return output.err
+			}
+
 			if !jsonOut {
 				cols := make([]render.CompareColumn, 0, len(outcomes))
 				for _, out := range outcomes {
 					cols = append(cols, buildCompareColumn(out))
 				}
-				width := 0
+				width := 1 // Piped output uses stacked sections.
 				if deps.TermWidth != nil {
 					width = deps.TermWidth()
-				} else {
+				} else if render.IsTerminal(deps.Stdout) {
 					width = render.TerminalWidth(deps.Stdout)
 				}
 				if err := render.RenderCompare(deps.Stdout, cols, render.CompareFormatOptions{

@@ -12,8 +12,6 @@ import (
 
 	"github.com/sudabon/subcli/internal/config"
 	"github.com/sudabon/subcli/internal/event"
-	"github.com/sudabon/subcli/internal/logging"
-	"github.com/sudabon/subcli/internal/policy"
 	"github.com/sudabon/subcli/internal/provider"
 	"github.com/sudabon/subcli/internal/render"
 )
@@ -23,17 +21,11 @@ func TestCompareCmd_ClaudeAndCodex_TTYAndJSONL(t *testing.T) {
 
 	t.Run("side-by-side TTY on wide terminal", func(t *testing.T) {
 		var stdout, stderr bytes.Buffer
-		deps := Deps{
-			LoadConfig:    func() (config.Config, error) { return config.Default(), nil },
-			DetectContext: func() policy.CallContext { return policy.CallContext{StdinIsTTY: true} },
-			LookPath:      fakeBinLookPath(t),
-			Environ:       func() []string { return os.Environ() },
-			Getwd:         func() (string, error) { return workDir, nil },
-			TermWidth:     func() int { return 120 },
-			Logger:        logging.NewWriter(&bytes.Buffer{}),
-			Stdout:        &stdout,
-			Stderr:        &stderr,
-		}
+		deps := testDeps(t)
+		deps.Getwd = func() (string, error) { return workDir, nil }
+		deps.TermWidth = func() int { return 120 }
+		deps.Stdout = &stdout
+		deps.Stderr = &stderr
 
 		cmd := NewRootCmd(deps)
 		cmd.SetArgs([]string{"compare", "--providers", "claude,codex", "要約して"})
@@ -56,19 +48,13 @@ func TestCompareCmd_ClaudeAndCodex_TTYAndJSONL(t *testing.T) {
 		}
 	})
 
-	t.Run("stacked fallback on narrow terminal", func(t *testing.T) {
+	t.Run("stacked layout when piped", func(t *testing.T) {
 		var stdout, stderr bytes.Buffer
-		deps := Deps{
-			LoadConfig:    func() (config.Config, error) { return config.Default(), nil },
-			DetectContext: func() policy.CallContext { return policy.CallContext{StdinIsTTY: true} },
-			LookPath:      fakeBinLookPath(t),
-			Environ:       func() []string { return os.Environ() },
-			Getwd:         func() (string, error) { return workDir, nil },
-			TermWidth:     func() int { return 80 },
-			Logger:        logging.NewWriter(&bytes.Buffer{}),
-			Stdout:        &stdout,
-			Stderr:        &stderr,
-		}
+		deps := testDeps(t)
+		deps.Getwd = func() (string, error) { return workDir, nil }
+		t.Setenv("COLUMNS", "240")
+		deps.Stdout = &stdout
+		deps.Stderr = &stderr
 
 		cmd := NewRootCmd(deps)
 		cmd.SetArgs([]string{"compare", "--providers", "claude,codex", "要約して"})
@@ -87,16 +73,10 @@ func TestCompareCmd_ClaudeAndCodex_TTYAndJSONL(t *testing.T) {
 
 	t.Run("--json outputs normalized JSONL with provider tags", func(t *testing.T) {
 		var stdout, stderr bytes.Buffer
-		deps := Deps{
-			LoadConfig:    func() (config.Config, error) { return config.Default(), nil },
-			DetectContext: func() policy.CallContext { return policy.CallContext{StdinIsTTY: true} },
-			LookPath:      fakeBinLookPath(t),
-			Environ:       func() []string { return os.Environ() },
-			Getwd:         func() (string, error) { return workDir, nil },
-			Logger:        logging.NewWriter(&bytes.Buffer{}),
-			Stdout:        &stdout,
-			Stderr:        &stderr,
-		}
+		deps := testDeps(t)
+		deps.Getwd = func() (string, error) { return workDir, nil }
+		deps.Stdout = &stdout
+		deps.Stderr = &stderr
 
 		cmd := NewRootCmd(deps)
 		cmd.SetArgs([]string{"compare", "--providers", "claude,codex", "--json", "要約して"})
@@ -127,23 +107,19 @@ func TestCompareCmd_ClaudeAndCodex_TTYAndJSONL(t *testing.T) {
 
 func TestCompareCmd_AgySubscriptionDeniedBeforeLaunchingAnyProcess(t *testing.T) {
 	invLog := filepath.Join(t.TempDir(), "invocations.log")
-	baseEnv := provider.SetEnv(os.Environ(), "FAKE_CLI_INVOCATION_LOG", invLog)
+	baseEnv := provider.SetEnv(fakeCLIEnv(), "FAKE_CLI_INVOCATION_LOG", invLog)
 	lookedUp := false
 
 	var stdout, stderr bytes.Buffer
-	deps := Deps{
-		LoadConfig:    func() (config.Config, error) { return config.Default(), nil },
-		DetectContext: func() policy.CallContext { return policy.CallContext{StdinIsTTY: true, UnderAgent: false} },
-		LookPath: func(file string) (string, error) {
-			lookedUp = true
-			return fakeBinLookPath(t)(file)
-		},
-		Environ: func() []string { return baseEnv },
-		Getwd:   func() (string, error) { return t.TempDir(), nil },
-		Logger:  logging.NewWriter(&bytes.Buffer{}),
-		Stdout:  &stdout,
-		Stderr:  &stderr,
+	deps := testDeps(t)
+	deps.LookPath = func(file string) (string, error) {
+		lookedUp = true
+		return fakeBinLookPath(t)(file)
 	}
+	deps.Environ = func() []string { return baseEnv }
+	deps.Getwd = func() (string, error) { return t.TempDir(), nil }
+	deps.Stdout = &stdout
+	deps.Stderr = &stderr
 
 	cmd := NewRootCmd(deps)
 	cmd.SetArgs([]string{"compare", "--providers", "claude,agy", "比較して"})
@@ -169,7 +145,7 @@ func TestCompareCmd_AgySubscriptionDeniedBeforeLaunchingAnyProcess(t *testing.T)
 func TestCompareCmd_EnforcesConfigMaxConcurrencyAndPartialFailureExitCode(t *testing.T) {
 	t.Run("respects max_concurrency from config", func(t *testing.T) {
 		concDir := t.TempDir()
-		baseEnv := append([]string{}, os.Environ()...)
+		baseEnv := fakeCLIEnv()
 		baseEnv = provider.SetEnv(baseEnv, "FAKE_CLI_MODE", "concurrency")
 		baseEnv = provider.SetEnv(baseEnv, "FAKE_CLI_CONCURRENCY_DIR", concDir)
 		baseEnv = provider.SetEnv(baseEnv, "FAKE_CLI_SLEEP_SEC", "0.15")
@@ -178,17 +154,13 @@ func TestCompareCmd_EnforcesConfigMaxConcurrencyAndPartialFailureExitCode(t *tes
 		cfg.Providers.Claude.MaxConcurrency = 1
 
 		var stdout, stderr bytes.Buffer
-		deps := Deps{
-			LoadConfig:    func() (config.Config, error) { return cfg, nil },
-			DetectContext: func() policy.CallContext { return policy.CallContext{StdinIsTTY: true} },
-			LookPath:      fakeBinLookPath(t),
-			Environ:       func() []string { return baseEnv },
-			Getwd:         func() (string, error) { return t.TempDir(), nil },
-			TermWidth:     func() int { return 120 },
-			Logger:        logging.NewWriter(&bytes.Buffer{}),
-			Stdout:        &stdout,
-			Stderr:        &stderr,
-		}
+		deps := testDeps(t)
+		deps.LoadConfig = func() (config.Config, error) { return cfg, nil }
+		deps.Environ = func() []string { return baseEnv }
+		deps.Getwd = func() (string, error) { return t.TempDir(), nil }
+		deps.TermWidth = func() int { return 120 }
+		deps.Stdout = &stdout
+		deps.Stderr = &stderr
 
 		cmd := NewRootCmd(deps)
 		cmd.SetArgs([]string{"compare", "--providers", "claude,claude,claude", "並列チェック"})
@@ -212,23 +184,18 @@ func TestCompareCmd_EnforcesConfigMaxConcurrencyAndPartialFailureExitCode(t *tes
 	})
 
 	t.Run("returns non-zero exit code when one provider fails after displaying all results", func(t *testing.T) {
-		baseEnv := append([]string{}, os.Environ()...)
+		baseEnv := fakeCLIEnv()
 		baseEnv = provider.SetEnv(baseEnv, "FAKE_CLI_CLAUDE_MODE", "exit")
 		baseEnv = provider.SetEnv(baseEnv, "FAKE_CLI_CLAUDE_EXIT_CODE", "5")
 		baseEnv = provider.SetEnv(baseEnv, "FAKE_CLI_STDERR_MSG", "claude failure")
 
 		var stdout, stderr bytes.Buffer
-		deps := Deps{
-			LoadConfig:    func() (config.Config, error) { return config.Default(), nil },
-			DetectContext: func() policy.CallContext { return policy.CallContext{StdinIsTTY: true} },
-			LookPath:      fakeBinLookPath(t),
-			Environ:       func() []string { return baseEnv },
-			Getwd:         func() (string, error) { return t.TempDir(), nil },
-			TermWidth:     func() int { return 120 },
-			Logger:        logging.NewWriter(&bytes.Buffer{}),
-			Stdout:        &stdout,
-			Stderr:        &stderr,
-		}
+		deps := testDeps(t)
+		deps.Environ = func() []string { return baseEnv }
+		deps.Getwd = func() (string, error) { return t.TempDir(), nil }
+		deps.TermWidth = func() int { return 120 }
+		deps.Stdout = &stdout
+		deps.Stderr = &stderr
 
 		cmd := NewRootCmd(deps)
 		cmd.SetArgs([]string{"compare", "--providers", "claude,codex", "比較"})
@@ -251,22 +218,17 @@ func TestChainCmd_TwoAndThreeSteps_AndJSONL(t *testing.T) {
 
 	t.Run("2-step chain expands Prev from claude to codex", func(t *testing.T) {
 		codexArgs := filepath.Join(t.TempDir(), "codex.args")
-		baseEnv := append([]string{}, os.Environ()...)
+		baseEnv := fakeCLIEnv()
 		baseEnv = provider.SetEnv(baseEnv, "FAKE_CLI_CLAUDE_TEXT", "claude-plan-abc")
 		baseEnv = provider.SetEnv(baseEnv, "FAKE_CLI_CODEX_TEXT", "codex-review-xyz")
 		baseEnv = provider.SetEnv(baseEnv, "FAKE_CLI_CODEX_RECORD_ARGS", codexArgs)
 
 		var stdout, stderr bytes.Buffer
-		deps := Deps{
-			LoadConfig:    func() (config.Config, error) { return config.Default(), nil },
-			DetectContext: func() policy.CallContext { return policy.CallContext{StdinIsTTY: true} },
-			LookPath:      fakeBinLookPath(t),
-			Environ:       func() []string { return baseEnv },
-			Getwd:         func() (string, error) { return workDir, nil },
-			Logger:        logging.NewWriter(&bytes.Buffer{}),
-			Stdout:        &stdout,
-			Stderr:        &stderr,
-		}
+		deps := testDeps(t)
+		deps.Environ = func() []string { return baseEnv }
+		deps.Getwd = func() (string, error) { return workDir, nil }
+		deps.Stdout = &stdout
+		deps.Stderr = &stderr
 
 		cmd := NewRootCmd(deps)
 		cmd.SetArgs([]string{
@@ -302,16 +264,10 @@ func TestChainCmd_TwoAndThreeSteps_AndJSONL(t *testing.T) {
 
 	t.Run("3-step chain with --json emits step-tagged JSONL", func(t *testing.T) {
 		var stdout, stderr bytes.Buffer
-		deps := Deps{
-			LoadConfig:    func() (config.Config, error) { return config.Default(), nil },
-			DetectContext: func() policy.CallContext { return policy.CallContext{StdinIsTTY: true} },
-			LookPath:      fakeBinLookPath(t),
-			Environ:       func() []string { return os.Environ() },
-			Getwd:         func() (string, error) { return workDir, nil },
-			Logger:        logging.NewWriter(&bytes.Buffer{}),
-			Stdout:        &stdout,
-			Stderr:        &stderr,
-		}
+		deps := testDeps(t)
+		deps.Getwd = func() (string, error) { return workDir, nil }
+		deps.Stdout = &stdout
+		deps.Stderr = &stderr
 
 		cmd := NewRootCmd(deps)
 		cmd.SetArgs([]string{
@@ -346,23 +302,19 @@ func TestChainCmd_TwoAndThreeSteps_AndJSONL(t *testing.T) {
 func TestChainCmd_AgySubscriptionDeniedAndStepLimitsBeforeLaunch(t *testing.T) {
 	t.Run("agy(subscription) in chain denied before launching any process", func(t *testing.T) {
 		invLog := filepath.Join(t.TempDir(), "invocations.log")
-		baseEnv := provider.SetEnv(os.Environ(), "FAKE_CLI_INVOCATION_LOG", invLog)
+		baseEnv := provider.SetEnv(fakeCLIEnv(), "FAKE_CLI_INVOCATION_LOG", invLog)
 		lookedUp := false
 
 		var stdout, stderr bytes.Buffer
-		deps := Deps{
-			LoadConfig:    func() (config.Config, error) { return config.Default(), nil },
-			DetectContext: func() policy.CallContext { return policy.CallContext{StdinIsTTY: true} },
-			LookPath: func(file string) (string, error) {
-				lookedUp = true
-				return fakeBinLookPath(t)(file)
-			},
-			Environ: func() []string { return baseEnv },
-			Getwd:   func() (string, error) { return t.TempDir(), nil },
-			Logger:  logging.NewWriter(&bytes.Buffer{}),
-			Stdout:  &stdout,
-			Stderr:  &stderr,
+		deps := testDeps(t)
+		deps.LookPath = func(file string) (string, error) {
+			lookedUp = true
+			return fakeBinLookPath(t)(file)
 		}
+		deps.Environ = func() []string { return baseEnv }
+		deps.Getwd = func() (string, error) { return t.TempDir(), nil }
+		deps.Stdout = &stdout
+		deps.Stderr = &stderr
 
 		cmd := NewRootCmd(deps)
 		cmd.SetArgs([]string{
@@ -392,17 +344,13 @@ func TestChainCmd_AgySubscriptionDeniedAndStepLimitsBeforeLaunch(t *testing.T) {
 
 	t.Run("rejects 1 step and 4 steps without launching any process", func(t *testing.T) {
 		lookedUp := false
-		deps := Deps{
-			LoadConfig:    func() (config.Config, error) { return config.Default(), nil },
-			DetectContext: func() policy.CallContext { return policy.CallContext{StdinIsTTY: true} },
-			LookPath: func(file string) (string, error) {
-				lookedUp = true
-				return "", errors.New("should not be called")
-			},
-			Logger: logging.NewWriter(&bytes.Buffer{}),
-			Stdout: &bytes.Buffer{},
-			Stderr: &bytes.Buffer{},
+		deps := testDeps(t)
+		deps.LookPath = func(file string) (string, error) {
+			lookedUp = true
+			return "", errors.New("should not be called")
 		}
+		deps.Stdout = &bytes.Buffer{}
+		deps.Stderr = &bytes.Buffer{}
 
 		for _, steps := range []string{"claude", "claude,codex,claude,codex"} {
 			cmd := NewRootCmd(deps)
@@ -423,23 +371,18 @@ func TestChainCmd_AgySubscriptionDeniedAndStepLimitsBeforeLaunch(t *testing.T) {
 
 	t.Run("step 1 failure stops chain and never launches step 2", func(t *testing.T) {
 		invLog := filepath.Join(t.TempDir(), "invocations.log")
-		baseEnv := append([]string{}, os.Environ()...)
+		baseEnv := fakeCLIEnv()
 		baseEnv = provider.SetEnv(baseEnv, "FAKE_CLI_INVOCATION_LOG", invLog)
 		baseEnv = provider.SetEnv(baseEnv, "FAKE_CLI_CLAUDE_MODE", "exit")
 		baseEnv = provider.SetEnv(baseEnv, "FAKE_CLI_CLAUDE_EXIT_CODE", "6")
 		baseEnv = provider.SetEnv(baseEnv, "FAKE_CLI_STDERR_MSG", "step1 failed hard")
 
 		var stdout, stderr bytes.Buffer
-		deps := Deps{
-			LoadConfig:    func() (config.Config, error) { return config.Default(), nil },
-			DetectContext: func() policy.CallContext { return policy.CallContext{StdinIsTTY: true} },
-			LookPath:      fakeBinLookPath(t),
-			Environ:       func() []string { return baseEnv },
-			Getwd:         func() (string, error) { return t.TempDir(), nil },
-			Logger:        logging.NewWriter(&bytes.Buffer{}),
-			Stdout:        &stdout,
-			Stderr:        &stderr,
-		}
+		deps := testDeps(t)
+		deps.Environ = func() []string { return baseEnv }
+		deps.Getwd = func() (string, error) { return t.TempDir(), nil }
+		deps.Stdout = &stdout
+		deps.Stderr = &stderr
 
 		cmd := NewRootCmd(deps)
 		cmd.SetArgs([]string{

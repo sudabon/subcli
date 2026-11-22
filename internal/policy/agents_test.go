@@ -1,6 +1,7 @@
 package policy
 
 import (
+	"errors"
 	"os"
 	"testing"
 )
@@ -24,7 +25,10 @@ func TestDetectUnderAgent_EnvVars(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			under, hint := detectUnderAgent(tc.environ, 1234, noAncestors)
+			under, hint, err := detectUnderAgent(tc.environ, 1234, noAncestors)
+			if err != nil {
+				t.Fatal(err)
+			}
 			if !under {
 				t.Fatalf("expected UnderAgent=true for %v", tc.environ)
 			}
@@ -41,6 +45,7 @@ func TestDetectUnderAgent_ProcessChain(t *testing.T) {
 		ancestors []string
 		wantUnder bool
 		wantHint  string
+		wantErr   error
 	}{
 		{
 			name:      "direct parent claude",
@@ -61,7 +66,8 @@ func TestDetectUnderAgent_ProcessChain(t *testing.T) {
 			wantHint:  "process:cursor-agent",
 		},
 		{
-			name:      "agent beyond depth 10 ignored",
+			name:      "unverified ancestry beyond depth 10",
+			wantErr:   errAncestorDepth,
 			ancestors: []string{"sh", "sh", "sh", "sh", "sh", "sh", "sh", "sh", "sh", "sh", "claude"},
 			wantUnder: false,
 			wantHint:  "",
@@ -78,9 +84,12 @@ func TestDetectUnderAgent_ProcessChain(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			under, hint := detectUnderAgent(cleanEnv, 9999, func(int32, int) ([]string, error) {
+			under, hint, err := detectUnderAgent(cleanEnv, 9999, func(int32, int) ([]string, error) {
 				return tc.ancestors, nil
 			})
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("error = %v, want %v", err, tc.wantErr)
+			}
 			if under != tc.wantUnder || hint != tc.wantHint {
 				t.Fatalf("detectUnderAgent() = (%v, %q), want (%v, %q)", under, hint, tc.wantUnder, tc.wantHint)
 			}
@@ -90,10 +99,17 @@ func TestDetectUnderAgent_ProcessChain(t *testing.T) {
 
 func TestListAncestorProcessNames_CurrentProcessSanity(t *testing.T) {
 	names, err := listAncestorProcessNames(int32(os.Getpid()), MaxAncestorDepth)
-	if err != nil {
+	if err != nil && !errors.Is(err, errAncestorDepth) {
 		t.Fatalf("listAncestorProcessNames() error: %v", err)
 	}
 	if len(names) > MaxAncestorDepth {
 		t.Errorf("returned %d ancestors, exceeds max %d", len(names), MaxAncestorDepth)
+	}
+}
+
+func TestListAncestorProcessNamesDepthExhausted(t *testing.T) {
+	_, err := listAncestorProcessNames(int32(os.Getpid()), 0)
+	if !errors.Is(err, errAncestorDepth) {
+		t.Fatalf("error = %v, want depth limit", err)
 	}
 }

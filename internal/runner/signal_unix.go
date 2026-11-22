@@ -10,19 +10,25 @@ import (
 	"time"
 )
 
-func configureProcAttr(cmd *exec.Cmd) {
+type processGroup struct{ proc *os.Process }
+
+func startProcessGroup(cmd *exec.Cmd) (processGroup, error) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Setpgid: true,
 	}
+	err := cmd.Start()
+	return processGroup{cmd.Process}, err
 }
 
-// terminateProcessGroup escalates signals to the child process group:
+func (processGroup) close() {}
+
+// terminate escalates signals to the child process group:
 // SIGINT -> grace -> SIGTERM -> grace -> SIGKILL.
-func terminateProcessGroup(proc *os.Process, done <-chan struct{}, grace time.Duration) {
-	if proc == nil || proc.Pid <= 0 {
+func (g processGroup) terminate(done <-chan struct{}, grace time.Duration) {
+	if g.proc == nil || g.proc.Pid <= 0 {
 		return
 	}
-	pgid := -proc.Pid
+	pgid := -g.proc.Pid
 
 	_ = syscall.Kill(pgid, syscall.SIGINT)
 	if waitDoneOrTimer(done, grace) {
@@ -48,7 +54,8 @@ func waitDoneOrTimer(done <-chan struct{}, d time.Duration) bool {
 	}
 }
 
-func exitCodeFromError(err error) int {
+// ExitCodeFromError returns the child exit status, including 128+signal on Unix.
+func ExitCodeFromError(err error) int {
 	if err == nil {
 		return 0
 	}

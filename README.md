@@ -7,18 +7,25 @@
 - **各公式 CLI で各自がログインすること**: `subcli` は独自認証フローを持たず、各公式 CLI（`claude` / `codex` / `agy`）の正規ログイン手順をそのまま起動します。利用者はご自身の環境で、各公式 CLI に対してご自身のアカウントでログインしてください。
 - **`subcli` は認証情報に触れないこと**: `subcli` は各公式 CLI の認証ファイル・OAuth トークン・OS キーチェーンを一切読み取り、コピー、保存、仲介しません。
 - **個人利用のローカルツールであること**: `subcli` は単一ユーザー・個人利用のローカル CLI です。サーバ化・HTTP/MCP としての外部公開・複数アカウントの自動切替機能は提供しません。
-- **実行前の規約ガード**: すべての操作は実行前に `internal/policy` の許可マトリクスと実行コンテキスト検査（TTY・他 AI エージェント配下検出）を通過します。規約上制限された操作は子プロセスを起動せずに拒否します。
+- **実行前の規約ガード**: `login`・`open`・`run`・`resume`・`compare`・`chain` は実行前に `internal/policy` の許可マトリクスと実行コンテキスト検査（TTY・他 AI エージェント配下検出）を通過します。規約上制限された操作は子プロセスを起動せずに拒否します。
 
 詳細は [docs/COMPLIANCE.md](docs/COMPLIANCE.md) を参照してください。
 
-## サポート対象（Phase 1）
+## アルファ版のコマンド
 
 | コマンド | 説明 |
 | --- | --- |
-| `subcli doctor` | 各公式 CLI（`claude` / `codex` / `agy`）の検出、バージョン、公式ステータス確認（対応 CLI のみ）、および `docs/COMPLIANCE.md` の規約確認日（30 日超過警告）を表示します |
+| `subcli doctor` | 各公式 CLI（`claude` / `codex` / `agy`）の検出、バージョン、公式ステータス確認（対応 CLI のみ）、および `docs/COMPLIANCE.md` の規約確認日（30 日以上で警告）を表示します |
 | `subcli login <provider>` | 対象プロバイダの公式ログインコマンドを TTY/stdio 継承で起動し、終了コードのみを表示します |
-| `subcli open <provider> [-- <extra-args>...]` | 対象プロバイダの対話 TUI を起動します（Unix では `syscall.Exec` でプロセス置換、Windows では stdio 継承で待機）。`.subcli/memory/MEMORY.md` が存在すれば自動で共有メモリを接続します |
+| `subcli open <provider> [-- <extra-args>...]` | 対象プロバイダの対話 TUI を起動します（Unix では `syscall.Exec` でプロセス置換、Windows では stdio 継承で待機）。Git が追跡していないローカルの `.subcli/memory/MEMORY.md` があれば自動で共有メモリを接続します |
 | `subcli memory <subcommand>` | リポジトリルート配下の `.subcli/memory/` でエージェント間共有メモリ（`.gitignore` 対象・チーム非共有）を初期化・追記・同期・インポートします |
+| `subcli run <provider> "<prompt>"` | Claude または Codex で単発実行し、成功時にセッションを保存します |
+| `subcli resume <id> "<prompt>"` | 保存したセッションで会話を続けます |
+| `subcli sessions [list\|show\|rm]` | ローカルセッションを一覧・表示・削除します |
+| `subcli compare --providers <p1,p2> "<prompt>"` | 同じプロンプトを複数のプロバイダで並列実行して結果を比較します |
+| `subcli chain --steps <p1,p2> --prompt "<prompt>" --then "{{.Prev}}"` | 2〜3 段の処理を順に実行し、前段の出力を次段に渡します |
+
+オプションと使用例は [使い方ガイド](USAGE.md) を参照してください。
 
 ## 設定ファイル
 

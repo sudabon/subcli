@@ -2,6 +2,7 @@ package agy
 
 import (
 	"context"
+	"fmt"
 	"os/exec"
 	"strings"
 
@@ -48,6 +49,54 @@ func (a *Adapter) InteractiveArgv(extra []string) []string {
 	out := make([]string, len(extra))
 	copy(out, extra)
 	return out
+}
+
+// InteractiveAuthArgs pins API-key sessions to the Gemini backend. For
+// subscriptions, only options for a local interactive session are forwarded.
+func (a *Adapter) InteractiveAuthArgs(auth provider.AuthMode, extra []string) ([]string, error) {
+	switch auth {
+	case provider.AuthAPIKey:
+		for _, arg := range extra {
+			name, _, _ := strings.Cut(arg, "=")
+			if name == "--settings" || name == "-settings" {
+				return nil, fmt.Errorf("agy の API キーモードでは --settings は subcli が設定します")
+			}
+		}
+		return append([]string{"--settings", `{"modelProvider":"gemini"}`}, extra...), nil
+	case provider.AuthSubscription:
+		if err := validateInteractiveOptions(extra); err != nil {
+			return nil, err
+		}
+		return a.InteractiveArgv(extra), nil
+	default:
+		return nil, fmt.Errorf("agy の認証モード %q は未対応です", auth)
+	}
+}
+
+// Match the option arity in the recorded agy CLI contract. Reject subcommands
+// and unrecognized options so a newer CLI cannot silently select a remote or
+// non-interactive entry point in subscription mode.
+func validateInteractiveOptions(args []string) error {
+	for i := 0; i < len(args); i++ {
+		option, _, inline := strings.Cut(args[i], "=")
+		name := strings.TrimPrefix(strings.TrimPrefix(option, "-"), "-")
+		if option != name {
+			switch name {
+			case "c", "continue", "new-project", "sandbox":
+				continue
+			case "add-dir", "agent", "conversation", "effort", "i", "log-file", "mode", "model", "project", "prompt-interactive":
+				if !inline {
+					if i+1 == len(args) || strings.HasPrefix(args[i+1], "-") {
+						return fmt.Errorf("agy の %s に値を指定してください", option)
+					}
+					i++
+				}
+				continue
+			}
+		}
+		return fmt.Errorf("agy のサブスクリプションでは対話起動用のオプションのみ指定できます")
+	}
+	return nil
 }
 
 // InteractiveMemoryArgs attaches the generated Antigravity rule projection

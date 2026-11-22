@@ -5,13 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/sudabon/subcli/internal/config"
-	"github.com/sudabon/subcli/internal/logging"
 	"github.com/sudabon/subcli/internal/memory"
 	"github.com/sudabon/subcli/internal/policy"
 	"github.com/sudabon/subcli/internal/provider"
@@ -19,7 +18,7 @@ import (
 
 func TestMemoryCommands_Lifecycle(t *testing.T) {
 	repo := t.TempDir()
-	if err := os.Mkdir(filepath.Join(repo, ".git"), 0o755); err != nil {
+	if err := exec.Command("git", "init", "-q", repo).Run(); err != nil {
 		t.Fatal(err)
 	}
 	subdir := filepath.Join(repo, "sub", "dir")
@@ -29,14 +28,11 @@ func TestMemoryCommands_Lifecycle(t *testing.T) {
 
 	execCmd := func(args ...string) (string, string, error) {
 		var stdout, stderr bytes.Buffer
-		deps := Deps{
-			LoadConfig: func() (config.Config, error) { return config.Default(), nil },
-			Getwd:      func() (string, error) { return subdir, nil },
-			Now:        func() time.Time { return time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC) },
-			Logger:     logging.NewWriter(&bytes.Buffer{}),
-			Stdout:     &stdout,
-			Stderr:     &stderr,
-		}
+		deps := testDeps(t)
+		deps.Getwd = func() (string, error) { return subdir, nil }
+		deps.Now = func() time.Time { return time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC) }
+		deps.Stdout = &stdout
+		deps.Stderr = &stderr
 		cmd := NewRootCmd(deps)
 		cmd.SetArgs(args)
 		err := cmd.Execute()
@@ -135,11 +131,11 @@ func TestOpenCmd_SharedMemoryIntegration(t *testing.T) {
 	setupRepo := func(t *testing.T) string {
 		t.Helper()
 		repo := t.TempDir()
-		if err := os.Mkdir(filepath.Join(repo, ".git"), 0o755); err != nil {
+		if err := exec.Command("git", "init", "-q", repo).Run(); err != nil {
 			t.Fatal(err)
 		}
 		store := memory.ForRoot(repo, true)
-		if _, err := store.AddEntry("Shared repo rule: prefer table tests", "", time.Date(2026, 11, 22, 10, 0, 0, 0, time.UTC), memory.InitOptions{}); err != nil {
+		if _, err := store.AddEntry("Shared repo rule: prefer table tests, avoid danger-full-access", "", time.Date(2026, 11, 22, 10, 0, 0, 0, time.UTC), memory.InitOptions{}); err != nil {
 			t.Fatal(err)
 		}
 		return repo
@@ -148,21 +144,17 @@ func TestOpenCmd_SharedMemoryIntegration(t *testing.T) {
 	t.Run("claude open attaches autoMemoryDirectory, add-dir, and env", func(t *testing.T) {
 		repo := setupRepo(t)
 		var gotArgv, gotEnv []string
-		deps := Deps{
-			LoadConfig:    func() (config.Config, error) { return config.Default(), nil },
-			DetectContext: func() policy.CallContext { return policy.CallContext{StdinIsTTY: true} },
-			LookPath:      func(file string) (string, error) { return "/usr/local/bin/" + file, nil },
-			Getwd:         func() (string, error) { return repo, nil },
-			ExecReplace: func(_ string, argv []string, env []string) error {
-				gotArgv = argv
-				gotEnv = env
-				return nil
-			},
-			Environ: func() []string { return []string{"PATH=/usr/bin"} },
-			Logger:  logging.NewWriter(&bytes.Buffer{}),
-			Stdout:  &bytes.Buffer{},
-			Stderr:  &bytes.Buffer{},
+		deps := testDeps(t)
+		deps.LookPath = func(file string) (string, error) { return "/usr/local/bin/" + file, nil }
+		deps.Getwd = func() (string, error) { return repo, nil }
+		deps.ExecReplace = func(_ string, argv []string, env []string) error {
+			gotArgv = argv
+			gotEnv = env
+			return nil
 		}
+		deps.Environ = func() []string { return []string{"PATH=/usr/bin"} }
+		deps.Stdout = &bytes.Buffer{}
+		deps.Stderr = &bytes.Buffer{}
 
 		cmd := NewRootCmd(deps)
 		cmd.SetArgs([]string{"open", "claude", "--", "--model", "sonnet"})
@@ -209,20 +201,16 @@ func TestOpenCmd_SharedMemoryIntegration(t *testing.T) {
 	t.Run("codex open attaches add-dir and developer_instructions", func(t *testing.T) {
 		repo := setupRepo(t)
 		var gotArgv []string
-		deps := Deps{
-			LoadConfig:    func() (config.Config, error) { return config.Default(), nil },
-			DetectContext: func() policy.CallContext { return policy.CallContext{StdinIsTTY: true} },
-			LookPath:      func(file string) (string, error) { return "/usr/local/bin/" + file, nil },
-			Getwd:         func() (string, error) { return repo, nil },
-			ExecReplace: func(_ string, argv []string, _ []string) error {
-				gotArgv = argv
-				return nil
-			},
-			Environ: func() []string { return []string{"PATH=/usr/bin"} },
-			Logger:  logging.NewWriter(&bytes.Buffer{}),
-			Stdout:  &bytes.Buffer{},
-			Stderr:  &bytes.Buffer{},
+		deps := testDeps(t)
+		deps.LookPath = func(file string) (string, error) { return "/usr/local/bin/" + file, nil }
+		deps.Getwd = func() (string, error) { return repo, nil }
+		deps.ExecReplace = func(_ string, argv []string, _ []string) error {
+			gotArgv = argv
+			return nil
 		}
+		deps.Environ = func() []string { return []string{"PATH=/usr/bin"} }
+		deps.Stdout = &bytes.Buffer{}
+		deps.Stderr = &bytes.Buffer{}
 
 		cmd := NewRootCmd(deps)
 		cmd.SetArgs([]string{"open", "codex", "--", "-m", "o3"})
@@ -235,7 +223,7 @@ func TestOpenCmd_SharedMemoryIntegration(t *testing.T) {
 		if !strings.Contains(joined, "--add-dir\n"+memDir) {
 			t.Errorf("argv missing --add-dir %s: %v", memDir, gotArgv)
 		}
-		if !strings.Contains(joined, "-c\ndeveloper_instructions=") || !strings.Contains(joined, "Shared repo rule: prefer table tests") {
+		if !strings.Contains(joined, "-c\ndeveloper_instructions=") || !strings.Contains(joined, "Shared repo rule: prefer table tests, avoid danger-full-access") {
 			t.Errorf("argv missing developer_instructions with shared memory: %v", gotArgv)
 		}
 	})
@@ -243,20 +231,16 @@ func TestOpenCmd_SharedMemoryIntegration(t *testing.T) {
 	t.Run("agy open attaches projection directory via add-dir", func(t *testing.T) {
 		repo := setupRepo(t)
 		var gotArgv []string
-		deps := Deps{
-			LoadConfig:    func() (config.Config, error) { return config.Default(), nil },
-			DetectContext: func() policy.CallContext { return policy.CallContext{StdinIsTTY: true, UnderAgent: false} },
-			LookPath:      func(file string) (string, error) { return "/usr/local/bin/" + file, nil },
-			Getwd:         func() (string, error) { return repo, nil },
-			ExecReplace: func(_ string, argv []string, _ []string) error {
-				gotArgv = argv
-				return nil
-			},
-			Environ: func() []string { return []string{"PATH=/usr/bin"} },
-			Logger:  logging.NewWriter(&bytes.Buffer{}),
-			Stdout:  &bytes.Buffer{},
-			Stderr:  &bytes.Buffer{},
+		deps := testDeps(t)
+		deps.LookPath = func(file string) (string, error) { return "/usr/local/bin/" + file, nil }
+		deps.Getwd = func() (string, error) { return repo, nil }
+		deps.ExecReplace = func(_ string, argv []string, _ []string) error {
+			gotArgv = argv
+			return nil
 		}
+		deps.Environ = func() []string { return []string{"PATH=/usr/bin"} }
+		deps.Stdout = &bytes.Buffer{}
+		deps.Stderr = &bytes.Buffer{}
 
 		cmd := NewRootCmd(deps)
 		cmd.SetArgs([]string{"open", "agy"})
@@ -274,7 +258,7 @@ func TestOpenCmd_SharedMemoryIntegration(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !strings.Contains(string(data), "Shared repo rule: prefer table tests") {
+		if !strings.Contains(string(data), "Shared repo rule: prefer table tests, avoid danger-full-access") {
 			t.Errorf("agy AGENTS.md projection missing shared entry:\n%s", string(data))
 		}
 	})
@@ -282,20 +266,16 @@ func TestOpenCmd_SharedMemoryIntegration(t *testing.T) {
 	t.Run("--no-memory skips attaching even when initialized", func(t *testing.T) {
 		repo := setupRepo(t)
 		var gotArgv []string
-		deps := Deps{
-			LoadConfig:    func() (config.Config, error) { return config.Default(), nil },
-			DetectContext: func() policy.CallContext { return policy.CallContext{StdinIsTTY: true} },
-			LookPath:      func(file string) (string, error) { return "/usr/local/bin/" + file, nil },
-			Getwd:         func() (string, error) { return repo, nil },
-			ExecReplace: func(_ string, argv []string, _ []string) error {
-				gotArgv = argv
-				return nil
-			},
-			Environ: func() []string { return nil },
-			Logger:  logging.NewWriter(&bytes.Buffer{}),
-			Stdout:  &bytes.Buffer{},
-			Stderr:  &bytes.Buffer{},
+		deps := testDeps(t)
+		deps.LookPath = func(file string) (string, error) { return "/usr/local/bin/" + file, nil }
+		deps.Getwd = func() (string, error) { return repo, nil }
+		deps.ExecReplace = func(_ string, argv []string, _ []string) error {
+			gotArgv = argv
+			return nil
 		}
+		deps.Environ = func() []string { return nil }
+		deps.Stdout = &bytes.Buffer{}
+		deps.Stderr = &bytes.Buffer{}
 
 		cmd := NewRootCmd(deps)
 		cmd.SetArgs([]string{"open", "--no-memory", "agy"})
@@ -309,24 +289,20 @@ func TestOpenCmd_SharedMemoryIntegration(t *testing.T) {
 
 	t.Run("--memory initializes .subcli and .gitignore on demand", func(t *testing.T) {
 		repo := t.TempDir()
-		if err := os.Mkdir(filepath.Join(repo, ".git"), 0o755); err != nil {
+		if err := exec.Command("git", "init", "-q", repo).Run(); err != nil {
 			t.Fatal(err)
 		}
 		var gotArgv []string
-		deps := Deps{
-			LoadConfig:    func() (config.Config, error) { return config.Default(), nil },
-			DetectContext: func() policy.CallContext { return policy.CallContext{StdinIsTTY: true} },
-			LookPath:      func(file string) (string, error) { return "/usr/local/bin/" + file, nil },
-			Getwd:         func() (string, error) { return repo, nil },
-			ExecReplace: func(_ string, argv []string, _ []string) error {
-				gotArgv = argv
-				return nil
-			},
-			Environ: func() []string { return nil },
-			Logger:  logging.NewWriter(&bytes.Buffer{}),
-			Stdout:  &bytes.Buffer{},
-			Stderr:  &bytes.Buffer{},
+		deps := testDeps(t)
+		deps.LookPath = func(file string) (string, error) { return "/usr/local/bin/" + file, nil }
+		deps.Getwd = func() (string, error) { return repo, nil }
+		deps.ExecReplace = func(_ string, argv []string, _ []string) error {
+			gotArgv = argv
+			return nil
 		}
+		deps.Environ = func() []string { return nil }
+		deps.Stdout = &bytes.Buffer{}
+		deps.Stderr = &bytes.Buffer{}
 
 		cmd := NewRootCmd(deps)
 		cmd.SetArgs([]string{"open", "--memory", "agy"})
@@ -346,25 +322,22 @@ func TestOpenCmd_SharedMemoryIntegration(t *testing.T) {
 
 	t.Run("policy denial happens BEFORE --memory creates any files", func(t *testing.T) {
 		repo := t.TempDir()
-		if err := os.Mkdir(filepath.Join(repo, ".git"), 0o755); err != nil {
+		if err := exec.Command("git", "init", "-q", repo).Run(); err != nil {
 			t.Fatal(err)
 		}
-		deps := Deps{
-			LoadConfig: func() (config.Config, error) { return config.Default(), nil },
-			DetectContext: func() policy.CallContext {
-				return policy.CallContext{StdinIsTTY: true, UnderAgent: true, AgentHint: "env:CLAUDECODE"}
-			},
-			LookPath: func(file string) (string, error) { return "/usr/local/bin/" + file, nil },
-			Getwd:    func() (string, error) { return repo, nil },
-			ExecReplace: func(_ string, _ []string, _ []string) error {
-				t.Fatal("ExecReplace must not be called")
-				return nil
-			},
-			Environ: func() []string { return nil },
-			Logger:  logging.NewWriter(&bytes.Buffer{}),
-			Stdout:  &bytes.Buffer{},
-			Stderr:  &bytes.Buffer{},
+		deps := testDeps(t)
+		deps.DetectContext = func() policy.CallContext {
+			return policy.CallContext{StdinIsTTY: true, UnderAgent: true, AgentHint: "env:CLAUDECODE"}
 		}
+		deps.LookPath = func(file string) (string, error) { return "/usr/local/bin/" + file, nil }
+		deps.Getwd = func() (string, error) { return repo, nil }
+		deps.ExecReplace = func(_ string, _ []string, _ []string) error {
+			t.Fatal("ExecReplace must not be called")
+			return nil
+		}
+		deps.Environ = func() []string { return nil }
+		deps.Stdout = &bytes.Buffer{}
+		deps.Stderr = &bytes.Buffer{}
 
 		cmd := NewRootCmd(deps)
 		cmd.SetArgs([]string{"open", "--memory", "agy"})

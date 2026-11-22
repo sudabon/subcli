@@ -6,7 +6,7 @@ Anthropic 公式 `claude` CLI を未改変のままヘッドレスおよびセ�
 ## Requirements
 
 ### Requirement: claude ヘッドレスおよび継続実行の引数構築
-`claude` アダプタは、Phase 0 で確認した実 CLI 契約に基づき、ヘッドレス実行用の引数（`-p "<prompt>" --output-format stream-json --verbose`、モデル指定時の `--model`、およびセッション継続時の `--resume <session_id>`）を構築しなければならない（SHALL）。権限オプション `--perm` は `read-only` を `--permission-mode plan`、`edit` を `--permission-mode acceptEdits` に変換し、権限確認をバイパスするフラグ（`bypassPermissions`、`--dangerously-skip-permissions` 等）はいかなる条件でも出力してはならない（MUST NOT）。
+`claude` アダプタは、Phase 0 で確認した実 CLI 契約に基づき、ヘッドレス実行用の引数（`-p --output-format stream-json --verbose [options] -- "<prompt>"`、モデル指定時の `--model`、およびセッション継続時の `--resume <session_id>`）を構築しなければならない（SHALL）。権限オプション `--perm` は `read-only` を `--permission-mode plan`、`edit` を `--permission-mode acceptEdits` に変換し、権限確認をバイパスするフラグ（`bypassPermissions`、`--dangerously-skip-permissions` 等）はいかなる条件でも出力してはならない（MUST NOT）。
 
 #### Scenario: read-only 権限でのヘッドレス実行引数生成
 - **WHEN** モデル指定と `--perm read-only` で `claude` のヘッドレス実行引数を生成する
