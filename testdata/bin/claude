@@ -1,0 +1,158 @@
+#!/bin/sh
+set -eu
+
+if [ "${1:-}" = "--version" ]; then
+    echo "${FAKE_CLI_VERSION:-2.1.330 (Claude Code Fake)}"
+    exit 0
+fi
+
+if [ -n "${FAKE_CLI_INVOCATION_LOG:-}" ]; then
+    printf 'claude:%s\n' "$$" >> "$FAKE_CLI_INVOCATION_LOG"
+fi
+
+record_args="${FAKE_CLI_CLAUDE_RECORD_ARGS:-${FAKE_CLI_RECORD_ARGS:-}}"
+if [ -n "$record_args" ]; then
+    : > "$record_args"
+    for arg in "$@"; do
+        printf '%s\n' "$arg" >> "$record_args"
+    done
+fi
+
+if [ -n "${FAKE_CLI_CLAUDE_APPEND_ARGS:-}" ]; then
+    printf '%s\n' '---CALL---' >> "$FAKE_CLI_CLAUDE_APPEND_ARGS"
+    for arg in "$@"; do
+        printf '%s\n' "$arg" >> "$FAKE_CLI_CLAUDE_APPEND_ARGS"
+    done
+fi
+
+if [ -n "${FAKE_CLI_RECORD_ENV:-}" ]; then
+    env | sort > "$FAKE_CLI_RECORD_ENV"
+fi
+
+if [ -n "${FAKE_CLI_RECORD_CWD:-}" ]; then
+    pwd > "$FAKE_CLI_RECORD_CWD"
+fi
+
+mode="${FAKE_CLI_CLAUDE_MODE:-${FAKE_CLI_MODE:-}}"
+exit_code="${FAKE_CLI_CLAUDE_EXIT_CODE:-${FAKE_CLI_EXIT_CODE:-0}}"
+
+if [ -z "$mode" ] && [ -n "${FAKE_CLI_FIXTURE:-}" ]; then
+    mode="fixture"
+fi
+
+case "$mode" in
+    fixture)
+        if [ -n "${FAKE_CLI_DELAY_SEC:-}" ]; then
+            while IFS= read -r line || [ -n "$line" ]; do
+                printf '%s\n' "$line"
+                sleep "$FAKE_CLI_DELAY_SEC"
+            done < "$FAKE_CLI_FIXTURE"
+        else
+            cat "$FAKE_CLI_FIXTURE"
+        fi
+        exit "${FAKE_CLI_EXIT_CODE:-0}"
+        ;;
+    longline)
+        target="${FAKE_CLI_LONG_LINE_BYTES:-1048576}"
+        chunk="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        while [ "${#chunk}" -lt "$target" ]; do
+            chunk="${chunk}${chunk}"
+        done
+        blocks=$(( (target + 1023) / 1024 ))
+        payload=$(printf '%s' "$chunk" | dd bs=1024 count="$blocks" 2>/dev/null)
+        printf '{"type":"system","subtype":"init","session_id":"sess-long-1"}\n'
+        printf '{"type":"assistant","message":{"content":[{"type":"text","text":"%s"}]},"session_id":"sess-long-1"}\n' "$payload"
+        printf '{"type":"result","subtype":"success","is_error":false,"session_id":"sess-long-1","result":"ok","usage":{"input_tokens":10,"output_tokens":20}}\n'
+        exit "${FAKE_CLI_EXIT_CODE:-0}"
+        ;;
+    stderr_overflow)
+        chunk="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        # 64 bytes * 16 = 1024 bytes per block; emit 96 blocks (~96KB) then marker
+        block="${chunk}${chunk}${chunk}${chunk}${chunk}${chunk}${chunk}${chunk}${chunk}${chunk}${chunk}${chunk}${chunk}${chunk}${chunk}${chunk}"
+        i=0
+        while [ "$i" -lt 96 ]; do
+            printf '%s\n' "$block" >&2
+            i=$((i + 1))
+        done
+        printf 'STDERR_TAIL_MARKER_END\n' >&2
+        exit "${FAKE_CLI_EXIT_CODE:-2}"
+        ;;
+    signal)
+        set +e
+        if [ "${FAKE_CLI_IGNORE_SIGINT:-0}" = "1" ]; then
+            trap 'if [ -n "${FAKE_CLI_SIGNAL_LOG:-}" ]; then echo "SIGINT" >> "$FAKE_CLI_SIGNAL_LOG"; fi' INT
+        else
+            trap 'if [ -n "${FAKE_CLI_SIGNAL_LOG:-}" ]; then echo "SIGINT" >> "$FAKE_CLI_SIGNAL_LOG"; fi; exit 130' INT
+        fi
+        if [ "${FAKE_CLI_IGNORE_SIGTERM:-0}" = "1" ]; then
+            trap 'if [ -n "${FAKE_CLI_SIGNAL_LOG:-}" ]; then echo "SIGTERM" >> "$FAKE_CLI_SIGNAL_LOG"; fi' TERM
+        else
+            trap 'if [ -n "${FAKE_CLI_SIGNAL_LOG:-}" ]; then echo "SIGTERM" >> "$FAKE_CLI_SIGNAL_LOG"; fi; exit 143' TERM
+        fi
+        # Emit a ready line so the test knows traps are installed
+        printf '{"type":"system","subtype":"init","session_id":"sess-signal"}\n'
+        while :; do
+            sleep 0.05 || true
+        done
+        ;;
+    sleep)
+        printf '{"type":"system","subtype":"init","session_id":"sess-sleep"}\n'
+        sleep "${FAKE_CLI_SLEEP_SEC:-30}"
+        exit "${FAKE_CLI_EXIT_CODE:-0}"
+        ;;
+    exit)
+        if [ -n "${FAKE_CLI_STDERR_MSG:-}" ]; then
+            printf '%s\n' "$FAKE_CLI_STDERR_MSG" >&2
+        fi
+        exit "${FAKE_CLI_CLAUDE_EXIT_CODE:-${FAKE_CLI_EXIT_CODE:-2}}"
+        ;;
+    empty_text)
+        printf '{"type":"system","subtype":"init","session_id":"fake-claude-empty"}\n'
+        printf '{"type":"result","subtype":"success","is_error":false,"session_id":"fake-claude-empty","result":"","usage":{"input_tokens":5,"output_tokens":0}}\n'
+        exit "$exit_code"
+        ;;
+    concurrency)
+        active_dir="${FAKE_CLI_CONCURRENCY_DIR:-}"
+        if [ -n "$active_dir" ]; then
+            marker="${active_dir}/active.claude.$$"
+            : > "$marker"
+            trap 'rm -f "$marker"' EXIT
+            count=$(ls -1 "${active_dir}"/active.claude.* 2>/dev/null | wc -l | tr -d ' ')
+            printf '%s\n' "$count" >> "${active_dir}/counts.claude"
+            total=$(ls -1 "${active_dir}"/active.* 2>/dev/null | wc -l | tr -d ' ')
+            printf '%s\n' "$total" >> "${active_dir}/counts.total"
+        fi
+        printf '{"type":"system","subtype":"init","session_id":"fake-claude-conc-%s"}\n' "$$"
+        sleep "${FAKE_CLI_SLEEP_SEC:-0.15}"
+        if [ -n "$active_dir" ]; then
+            count=$(ls -1 "${active_dir}"/active.claude.* 2>/dev/null | wc -l | tr -d ' ')
+            printf '%s\n' "$count" >> "${active_dir}/counts.claude"
+        fi
+        printf '{"type":"assistant","message":{"content":[{"type":"text","text":"conc-claude-%s"}]},"session_id":"fake-claude-conc-%s"}\n' "$$" "$$"
+        printf '{"type":"result","subtype":"success","is_error":false,"session_id":"fake-claude-conc-%s","result":"ok","usage":{"input_tokens":10,"output_tokens":5}}\n' "$$"
+        exit "$exit_code"
+        ;;
+    *)
+        # Default minimal stream-json response; detect --resume for round-trip tests
+        sess_id="fake-claude-sess-001"
+        resumed="false"
+        prev=""
+        for arg in "$@"; do
+            if [ "$prev" = "--resume" ]; then
+                sess_id="$arg"
+                resumed="true"
+            fi
+            prev="$arg"
+        done
+        printf '{"type":"system","subtype":"init","session_id":"%s"}\n' "$sess_id"
+        if [ "$resumed" = "true" ]; then
+            printf '{"type":"assistant","message":{"content":[{"type":"text","text":"resumed:%s"}]},"session_id":"%s"}\n' "$sess_id" "$sess_id"
+            printf '{"type":"result","subtype":"success","is_error":false,"session_id":"%s","result":"resumed:%s","total_cost_usd":0.0123,"usage":{"input_tokens":12,"output_tokens":34}}\n' "$sess_id" "$sess_id"
+        else
+            reply="${FAKE_CLI_CLAUDE_TEXT:-hello from fake claude}"
+            printf '{"type":"assistant","message":{"content":[{"type":"text","text":"%s"}]},"session_id":"%s"}\n' "$reply" "$sess_id"
+            printf '{"type":"result","subtype":"success","is_error":false,"session_id":"%s","result":"%s","total_cost_usd":0.0123,"usage":{"input_tokens":10,"output_tokens":20}}\n' "$sess_id" "$reply"
+        fi
+        exit "$exit_code"
+        ;;
+esac
