@@ -1,0 +1,163 @@
+#!/bin/sh
+set -eu
+
+if [ "${1:-}" = "--version" ]; then
+    echo "${FAKE_CLI_VERSION:-codex-cli 0.171.0-fake}"
+    exit 0
+fi
+
+if [ -n "${FAKE_CLI_INVOCATION_LOG:-}" ]; then
+    printf 'codex:%s\n' "$$" >> "$FAKE_CLI_INVOCATION_LOG"
+fi
+
+record_args="${FAKE_CLI_CODEX_RECORD_ARGS:-${FAKE_CLI_RECORD_ARGS:-}}"
+if [ -n "$record_args" ]; then
+    : > "$record_args"
+    for arg in "$@"; do
+        printf '%s\n' "$arg" >> "$record_args"
+    done
+fi
+
+if [ -n "${FAKE_CLI_CODEX_APPEND_ARGS:-}" ]; then
+    printf '%s\n' '---CALL---' >> "$FAKE_CLI_CODEX_APPEND_ARGS"
+    for arg in "$@"; do
+        printf '%s\n' "$arg" >> "$FAKE_CLI_CODEX_APPEND_ARGS"
+    done
+fi
+
+if [ -n "${FAKE_CLI_RECORD_ENV:-}" ]; then
+    env | sort > "$FAKE_CLI_RECORD_ENV"
+fi
+
+if [ -n "${FAKE_CLI_RECORD_CWD:-}" ]; then
+    pwd > "$FAKE_CLI_RECORD_CWD"
+fi
+
+if [ -n "${FAKE_CLI_RECORD_STDIN:-}" ]; then
+    cat > "$FAKE_CLI_RECORD_STDIN"
+fi
+
+mode="${FAKE_CLI_CODEX_MODE:-${FAKE_CLI_MODE:-}}"
+exit_code="${FAKE_CLI_CODEX_EXIT_CODE:-${FAKE_CLI_EXIT_CODE:-0}}"
+
+if [ -z "$mode" ] && [ -n "${FAKE_CLI_FIXTURE:-}" ]; then
+    mode="fixture"
+fi
+
+case "$mode" in
+    fixture)
+        if [ -n "${FAKE_CLI_DELAY_SEC:-}" ]; then
+            while IFS= read -r line || [ -n "$line" ]; do
+                printf '%s\n' "$line"
+                sleep "$FAKE_CLI_DELAY_SEC"
+            done < "$FAKE_CLI_FIXTURE"
+        else
+            cat "$FAKE_CLI_FIXTURE"
+        fi
+        exit "${FAKE_CLI_EXIT_CODE:-0}"
+        ;;
+    longline)
+        target="${FAKE_CLI_LONG_LINE_BYTES:-1048576}"
+        chunk="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        while [ "${#chunk}" -lt "$target" ]; do
+            chunk="${chunk}${chunk}"
+        done
+        blocks=$(( (target + 1023) / 1024 ))
+        payload=$(printf '%s' "$chunk" | dd bs=1024 count="$blocks" 2>/dev/null)
+        printf '{"type":"thread.started","thread_id":"thread-long-1"}\n'
+        printf '{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"%s"}}\n' "$payload"
+        printf '{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":20}}\n'
+        exit "${FAKE_CLI_EXIT_CODE:-0}"
+        ;;
+    stderr_overflow)
+        chunk="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        block="${chunk}${chunk}${chunk}${chunk}${chunk}${chunk}${chunk}${chunk}${chunk}${chunk}${chunk}${chunk}${chunk}${chunk}${chunk}${chunk}"
+        i=0
+        while [ "$i" -lt 96 ]; do
+            printf '%s\n' "$block" >&2
+            i=$((i + 1))
+        done
+        printf 'STDERR_TAIL_MARKER_END\n' >&2
+        exit "${FAKE_CLI_EXIT_CODE:-2}"
+        ;;
+    signal)
+        set +e
+        if [ "${FAKE_CLI_IGNORE_SIGINT:-0}" = "1" ]; then
+            trap 'if [ -n "${FAKE_CLI_SIGNAL_LOG:-}" ]; then echo "SIGINT" >> "$FAKE_CLI_SIGNAL_LOG"; fi' INT
+        else
+            trap 'if [ -n "${FAKE_CLI_SIGNAL_LOG:-}" ]; then echo "SIGINT" >> "$FAKE_CLI_SIGNAL_LOG"; fi; exit 130' INT
+        fi
+        if [ "${FAKE_CLI_IGNORE_SIGTERM:-0}" = "1" ]; then
+            trap 'if [ -n "${FAKE_CLI_SIGNAL_LOG:-}" ]; then echo "SIGTERM" >> "$FAKE_CLI_SIGNAL_LOG"; fi' TERM
+        else
+            trap 'if [ -n "${FAKE_CLI_SIGNAL_LOG:-}" ]; then echo "SIGTERM" >> "$FAKE_CLI_SIGNAL_LOG"; fi; exit 143' TERM
+        fi
+        printf '{"type":"thread.started","thread_id":"thread-signal"}\n'
+        while :; do
+            sleep 0.05 || true
+        done
+        ;;
+    sleep)
+        printf '{"type":"thread.started","thread_id":"thread-sleep"}\n'
+        sleep "${FAKE_CLI_SLEEP_SEC:-30}"
+        exit "${FAKE_CLI_EXIT_CODE:-0}"
+        ;;
+    exit)
+        if [ -n "${FAKE_CLI_STDERR_MSG:-}" ]; then
+            printf '%s\n' "$FAKE_CLI_STDERR_MSG" >&2
+        fi
+        exit "${FAKE_CLI_CODEX_EXIT_CODE:-${FAKE_CLI_EXIT_CODE:-2}}"
+        ;;
+    empty_text)
+        printf '{"type":"thread.started","thread_id":"fake-codex-empty"}\n'
+        printf '{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":0}}\n'
+        exit "$exit_code"
+        ;;
+    concurrency)
+        active_dir="${FAKE_CLI_CONCURRENCY_DIR:-}"
+        if [ -n "$active_dir" ]; then
+            marker="${active_dir}/active.codex.$$"
+            : > "$marker"
+            trap 'rm -f "$marker"' EXIT
+            count=$(ls -1 "${active_dir}"/active.codex.* 2>/dev/null | wc -l | tr -d ' ')
+            printf '%s\n' "$count" >> "${active_dir}/counts.codex"
+            total=$(ls -1 "${active_dir}"/active.* 2>/dev/null | wc -l | tr -d ' ')
+            printf '%s\n' "$total" >> "${active_dir}/counts.total"
+        fi
+        printf '{"type":"thread.started","thread_id":"fake-codex-conc-%s"}\n' "$$"
+        sleep "${FAKE_CLI_SLEEP_SEC:-0.15}"
+        if [ -n "$active_dir" ]; then
+            count=$(ls -1 "${active_dir}"/active.codex.* 2>/dev/null | wc -l | tr -d ' ')
+            printf '%s\n' "$count" >> "${active_dir}/counts.codex"
+        fi
+        printf '{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"conc-codex-%s"}}\n' "$$"
+        printf '{"type":"turn.completed","usage":{"input_tokens":50,"output_tokens":10}}\n'
+        exit "$exit_code"
+        ;;
+    *)
+        thread_id="fake-codex-thread-001"
+        resumed="false"
+        if [ "${1:-}" = "exec" ] && [ "${2:-}" = "resume" ]; then
+            resumed="true"
+            # Positional SESSION_ID is the second-to-last arg (before PROMPT)
+            prev=""
+            last=""
+            for arg in "$@"; do
+                prev="$last"
+                last="$arg"
+            done
+            if [ -n "$prev" ]; then
+                thread_id="$prev"
+            fi
+        fi
+        printf '{"type":"thread.started","thread_id":"%s"}\n' "$thread_id"
+        if [ "$resumed" = "true" ]; then
+            printf '{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"resumed:%s"}}\n' "$thread_id"
+        else
+            reply="${FAKE_CLI_CODEX_TEXT:-hello from fake codex}"
+            printf '{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"%s"}}\n' "$reply"
+        fi
+        printf '{"type":"turn.completed","usage":{"input_tokens":100,"output_tokens":25}}\n'
+        exit "$exit_code"
+        ;;
+esac

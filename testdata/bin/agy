@@ -1,0 +1,19 @@
+#!/bin/sh
+set -eu
+
+if [ -n "${FAKE_CLI_INVOCATION_LOG:-}" ]; then
+    printf 'agy:%s\n' "$$" >> "$FAKE_CLI_INVOCATION_LOG"
+fi
+
+if [ "${1:-}" = "--version" ]; then
+    echo "${FAKE_CLI_VERSION:-1.5.14-fake}"
+    exit 0
+fi
+
+if [ -n "${FAKE_CLI_FIXTURE:-}" ]; then
+    cat "$FAKE_CLI_FIXTURE"
+    exit "${FAKE_CLI_EXIT_CODE:-0}"
+fi
+
+printf '{"type":"result","status":"ok","response":"hello from fake agy"}\n'
+exit "${FAKE_CLI_EXIT_CODE:-0}"
